@@ -1,0 +1,29 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "MIT"
+issueTrackerURL = "https://github.com/MikasaAckerrman/ragdolls/issues"
+
+[[mods]]
+modId = "ragdolls"
+version = "1.0.0"
+displayName = "Ragdolls"
+authors = "Slayer"
+description = '''
+Physics-based ragdoll corpses for all living entities, including modded mobs.
+On death an entity collapses into a single, glued-together rigid ragdoll that
+tumbles and is thrown according to the direction and power of the killing blow.
+'''
+
+[[dependencies.ragdolls]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.0,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.ragdolls]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.22)"
+ordering = "NONE"
+side = "BOTH"
