@@ -129,6 +129,9 @@ public final class LimbSkeleton {
      * model instance is shared across all entities of this type, so it must be left untouched.
      */
     public void apply(float partialTick) {
+        if (applied) {
+            return; // re-entrancy guard: a nested entity render must not double-save/offset
+        }
         for (int i = 0; i < bones.length; i++) {
             ModelPart part = bones[i];
             sx[i] = part.xRot;
