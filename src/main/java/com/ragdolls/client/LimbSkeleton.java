@@ -22,10 +22,10 @@ public final class LimbSkeleton {
 
     private static final int MAX_BONES = 24;
 
-    private static final float SPRING = 0.32f;      // pull back toward the natural pose
-    private static final float DAMP = 0.42f;        // velocity damping
-    private static final float GRAV_SAG = 0.010f;   // constant downward droop on pitch
-    private static final float MAX_ANGLE = 0.70f;   // clamp (~40 deg) so limbs never invert
+    private static final float SPRING = 0.34f;      // pull back toward the natural pose
+    private static final float DAMP = 0.55f;        // velocity damping (higher = less jitter)
+    private static final float GRAV_SAG = 0.008f;   // constant downward droop on pitch
+    private static final float MAX_ANGLE = 0.45f;   // clamp (~26 deg) so limbs stay attached-looking
     private static final float SETTLE_EPS = 0.0006f;
     private static final float WAKE_SPEED = 0.01f;  // body motion above this re-energises limbs
 
@@ -98,16 +98,16 @@ public final class LimbSkeleton {
             return; // fully asleep: no work until the body moves again
         }
 
-        float kick = (bodySpin * 0.5f + bodySpeed * 1.5f) * floppiness;
+        float kick = (bodySpin * 0.4f + bodySpeed * 1.0f) * floppiness;
         float sag = GRAV_SAG * floppiness;
         float maxMag = 0.0f;
 
         for (int i = 0; i < bones.length; i++) {
             float phase = ((i & 1) == 0) ? 1.0f : -1.0f;
 
-            float ax = -SPRING * ox[i] - DAMP * vx[i] + sag + phase * kick * 0.4f;
-            float ay = -SPRING * oy[i] - DAMP * vy[i] + phase * kick * 0.3f;
-            float az = -SPRING * oz[i] - DAMP * vz[i] + phase * kick;
+            float ax = -SPRING * ox[i] - DAMP * vx[i] + sag + phase * kick * 0.25f;
+            float ay = -SPRING * oy[i] - DAMP * vy[i] + phase * kick * 0.15f;
+            float az = -SPRING * oz[i] - DAMP * vz[i] + phase * kick * 0.5f;
 
             vx[i] += ax;
             vy[i] += ay;

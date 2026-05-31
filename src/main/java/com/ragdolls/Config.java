@@ -13,6 +13,7 @@ public final class Config {
 
     public static final ModConfigSpec.DoubleValue LIFETIME_SECONDS;
     public static final ModConfigSpec.DoubleValue FADE_SECONDS;
+    public static final ModConfigSpec.DoubleValue SETTLE_SECONDS;
     public static final ModConfigSpec.DoubleValue KNOCKBACK_MULTIPLIER;
     public static final ModConfigSpec.IntValue MAX_RAGDOLLS;
     public static final ModConfigSpec.DoubleValue MAX_RENDER_DISTANCE;
@@ -29,8 +30,12 @@ public final class Config {
                 .comment("How long a corpse stays before it fades out, in seconds.")
                 .defineInRange("lifetimeSeconds", 12.0, 0.5, 600.0);
         FADE_SECONDS = b
-                .comment("Duration of the smooth shrink/fade-out at the end of a corpse's life, in seconds.")
-                .defineInRange("fadeSeconds", 1.5, 0.0, 30.0);
+                .comment("Duration of the smooth transparent fade-out before a corpse is removed, in seconds.")
+                .defineInRange("fadeSeconds", 1.5, 0.1, 30.0);
+        SETTLE_SECONDS = b
+                .comment("A corpse must lie motionless this long before it freezes (drops its physics",
+                        "but keeps its pose). Until then it still reacts to the world.")
+                .defineInRange("settleSeconds", 5.0, 0.0, 60.0);
         KNOCKBACK_MULTIPLIER = b
                 .comment("Multiplier for how far corpses are thrown by the killing blow (1.0 = realistic).")
                 .defineInRange("knockbackMultiplier", 1.0, 0.0, 5.0);
@@ -38,9 +43,9 @@ public final class Config {
 
         b.push("performance");
         MAX_RAGDOLLS = b
-                .comment("Maximum number of corpses simulated at once. Oldest are removed first.",
-                        "Lower this if you see frame drops during mass deaths (mob farms).")
-                .defineInRange("maxActiveRagdolls", 64, 1, 1024);
+                .comment("Maximum number of corpses at once. When exceeded, the oldest fades out and",
+                        "is removed. Lower this if you see frame drops during mass deaths (mob farms).")
+                .defineInRange("maxActiveRagdolls", 15, 1, 1024);
         MAX_RENDER_DISTANCE = b
                 .comment("Do not render corpses farther than this many blocks (0 = no limit).")
                 .defineInRange("maxRenderDistance", 64.0, 0.0, 512.0);
@@ -80,8 +85,13 @@ public final class Config {
         return Math.max(0, (int) Math.round(seconds * 20.0));
     }
 
+    public static int settleTicks() {
+        double seconds = SPEC.isLoaded() ? SETTLE_SECONDS.get() : 5.0;
+        return Math.max(1, (int) Math.round(seconds * 20.0));
+    }
+
     public static int maxRagdolls() {
-        return SPEC.isLoaded() ? MAX_RAGDOLLS.get() : 64;
+        return SPEC.isLoaded() ? MAX_RAGDOLLS.get() : 15;
     }
 
     public static double maxRenderDistance() {

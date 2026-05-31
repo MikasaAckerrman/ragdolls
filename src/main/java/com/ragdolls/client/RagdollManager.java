@@ -30,6 +30,8 @@ public final class RagdollManager {
     // Insertion-ordered so the eldest corpse can be evicted first when the cap is hit.
     private static final Map<Integer, Ragdoll> ACTIVE = new LinkedHashMap<>();
 
+    private static final int EVICT_FADE_TICKS = 8; // fast, smooth dissolve when over the cap
+
     private RagdollManager() {}
 
     public static void clear() {
@@ -46,10 +48,6 @@ public final class RagdollManager {
         if (!(entity instanceof LivingEntity living)) {
             return;
         }
-        // The local player's death has its own camera/respawn handling, leave it untouched.
-        if (entity == mc.player) {
-            return;
-        }
         // Only entities drawn by a LivingEntityRenderer are supported. Anything else (e.g. the Ender
         // Dragon, which uses a bespoke multi-part renderer) is skipped.
         EntityRenderer<?> renderer = mc.getEntityRenderDispatcher().getRenderer(entity);
@@ -62,21 +60,35 @@ public final class RagdollManager {
             return;
         }
 
-        // Performance cap: evict the oldest corpse(s) before adding a new one.
+        // Performance cap: when too many live corpses exist, dissolve the oldest one(s) so the count
+        // stays bounded. They are removed from memory once their fade-out completes.
         int max = Config.maxRagdolls();
-        Iterator<Integer> it = ACTIVE.keySet().iterator();
-        while (ACTIVE.size() >= max && it.hasNext()) {
-            it.next();
-            it.remove();
-            Ragdolls.LOGGER.debug("Evicted oldest ragdoll to honour cap ({})", max);
+        int liveCount = 0;
+        for (Ragdoll r : ACTIVE.values()) {
+            if (!r.isFadingOut()) {
+                liveCount++;
+            }
+        }
+        for (Ragdoll r : ACTIVE.values()) {
+            if (liveCount < max) {
+                break;
+            }
+            if (!r.isFadingOut()) {
+                r.startFade(EVICT_FADE_TICKS);
+                liveCount--;
+                Ragdolls.LOGGER.debug("Evicting oldest ragdoll (fade-out) to honour cap ({})", max);
+            }
         }
 
         EntityModel<?> model = livingRenderer.getModel();
         ACTIVE.put(entity.getId(), new Ragdoll(living, payload, model));
 
-        // Take the entity out of the world: stops the vanilla model, fire and shadow render at the
-        // death position. The ragdoll holds its own reference for rendering.
-        mc.level.removeEntity(entity.getId(), Entity.RemovalReason.DISCARDED);
+        // Take the entity out of the world so vanilla stops drawing its model, fire and shadow at
+        // the death spot. The local player is left in place (removing it would break the respawn /
+        // death-screen handling); its corpse simply renders alongside.
+        if (entity != mc.player) {
+            mc.level.removeEntity(entity.getId(), Entity.RemovalReason.DISCARDED);
+        }
 
         Ragdolls.LOGGER.debug("Spawned ragdoll id={} type={} (active={})",
                 entity.getId(), entity.getType(), ACTIVE.size());

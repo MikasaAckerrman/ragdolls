@@ -26,17 +26,21 @@ import org.joml.Vector3f;
 import java.util.List;
 
 /**
- * A single rigid-body corpse. The whole entity model is kept intact ("glued") and treated as one
- * solid object with a position, linear velocity, an orientation quaternion and a spin axis/speed.
+ * A single rigid-body corpse with optional floppy limbs.
  *
- * <p>Collision uses Minecraft's own swept block collision, so the corpse is stopped by floors,
- * walls, ceilings and rests on ledges exactly like a live entity. Lava burns it away; water makes
- * it float and drift with the current. When it settles on solid ground it stops simulating until
- * either it expires or the block beneath it disappears, in which case it wakes and keeps falling.</p>
+ * <p>Lifecycle:</p>
+ * <ol>
+ *   <li><b>Physics</b> - thrown by the killing blow, tumbles, collides with the world (floors,
+ *       walls, ledges), burns in lava, floats in water.</li>
+ *   <li><b>Freeze</b> - once it has lain motionless on solid ground for {@code settleSeconds} it
+ *       drops its physics (to cost nothing) but keeps the exact pose it ended up in.</li>
+ *   <li><b>Fade</b> - it dissolves smoothly (vertex alpha) and is then removed from memory. This is
+ *       triggered by its lifetime expiring, the support beneath a frozen corpse disappearing, or
+ *       being evicted when the corpse cap is exceeded.</li>
+ * </ol>
  *
- * <p>The launch impulse is derived from the actual killing damage (so a hit does not fling a body
- * across the map), shaped by where it was hit and what killed it. It is a deliberately tiny custom
- * rigid body, not a physics engine, to stay dependency-free and mod-compatible.</p>
+ * <p>Entities whose model exposes no vanilla parts (e.g. GeckoLib mobs) cannot be articulated, so
+ * instead of a rigid ragdoll they simply die with a graceful fade-out in place.</p>
  */
 public final class Ragdoll {
 
@@ -51,14 +55,16 @@ public final class Ragdoll {
     private static final double WATER_CURRENT = 0.9;
     private static final double FLUID_MAX_SPEED = 0.25;
 
-    private static final int BURN_TICKS = 30; // how fast lava consumes a corpse (~1.5s)
-    private static final int RESTDROP_RAMP_TICKS = 4; // smooth settle so a lying body is not popped down
+    private static final int BURN_TICKS = 30;          // how fast lava consumes a corpse (~1.5s)
+    private static final int RESTDROP_RAMP_TICKS = 4;  // smooth settle so a lying body is not popped down
 
     private final LivingEntity entity;
     private final double bbWidth;
     private final double bbHeight;
     private final double halfHeight;
     private final LimbSkeleton skeleton;
+    private final boolean fadeOnly;     // non-articulable model -> graceful dissolve, no tumble
+    private final int settleTicks;
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -73,13 +79,18 @@ public final class Ragdoll {
     private int age = 0;
     private int maxAgeTicks;
     private int fadeTicks;
-    private boolean resting = false;
+    private int stillTicks = 0;
+    private boolean frozen = false;
     private boolean burning = false;
     private boolean consumed = false;
     private boolean renderErrorLogged = false;
 
-    // When the corpse settles, its model is dropped so the body actually lies on the ground instead
-    // of hovering at centre-of-mass height. Ramped in over a few ticks to avoid a visible pop.
+    // Forced fade-out (lifetime / support loss / eviction / graceful death).
+    private int fadeStartAge = -1;
+    private int fadeDurTicks = 1;
+
+    // When the corpse settles, its model is dropped so the body lies on the ground instead of
+    // hovering at centre-of-mass height. Ramped in over a few ticks to avoid a visible pop.
     private double restDropTarget = 0.0;
     private int restStartAge = -1;
 
@@ -88,7 +99,9 @@ public final class Ragdoll {
         this.bbWidth = Math.max(0.2, entity.getBbWidth());
         this.bbHeight = Math.max(0.2, entity.getBbHeight());
         this.halfHeight = this.bbHeight * 0.5;
-        this.skeleton = Config.enableLimbs() ? LimbSkeleton.capture(model) : null;
+        this.skeleton = LimbSkeleton.capture(model); // null if the model has no usable parts
+        this.fadeOnly = (this.skeleton == null);
+        this.settleTicks = Config.settleTicks();
 
         this.maxAgeTicks = Config.lifetimeTicks();
         this.fadeTicks = Math.min(Config.fadeTicks(), maxAgeTicks);
@@ -97,6 +110,12 @@ public final class Ragdoll {
         this.x = this.px = entity.getX();
         this.y = this.py = entity.getY();
         this.z = this.pz = entity.getZ();
+
+        if (fadeOnly) {
+            // Mobs we cannot articulate just die with a clean dissolve where they fell.
+            startFade(Math.max(fadeTicks, 16));
+            return;
+        }
 
         Vec3 dir = new Vec3(payload.dirX(), 0.0, payload.dirZ());
         if (dir.lengthSqr() < 1.0e-4) {
@@ -159,21 +178,23 @@ public final class Ragdoll {
         this.prevRot.set(rot);
         age++;
 
-        if (skeleton != null) {
+        // Limbs keep simulating until the body freezes (then they hold their final pose) or it
+        // starts dissolving.
+        if (skeleton != null && Config.enableLimbs() && !frozen && !isFadingOut()) {
             float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
             skeleton.tick(speed, Math.abs(spinSpeed), (float) Config.limbFloppiness());
         }
 
-        // Settled on solid ground: behave like a static dead entity (no simulation cost). Every so
-        // often check the block underneath; if its support vanished, wake up and keep falling.
-        if (resting) {
+        if (isFadingOut()) {
+            return; // dissolving in place; removal handled by isFinished()
+        }
+
+        if (frozen) {
+            // No physics. If the ground beneath disappears, dissolve gracefully (not fall).
             if (age % 10 == 0 && !isSupported(level)) {
-                resting = false;
-                restStartAge = -1;
-                restDropTarget = 0.0;
-            } else {
-                return;
+                startFade(fadeTicks);
             }
+            return;
         }
 
         BlockPos comPos = BlockPos.containing(x, y + halfHeight, z);
@@ -219,7 +240,6 @@ public final class Ragdoll {
         boolean hitX = moved.x != wanted.x;
         boolean hitY = moved.y != wanted.y;
         boolean hitZ = moved.z != wanted.z;
-        boolean landed = hitY && wanted.y < 0.0;
 
         x += moved.x;
         y += moved.y;
@@ -246,15 +266,53 @@ public final class Ragdoll {
             }
         }
 
-        // Come to rest only on solid ground (never while floating), once nearly motionless.
+        // Track how long the body has been at rest on solid ground; freeze after settleTicks.
+        boolean onGround = hitY && wanted.y < 0.0;
         double horizontal = Math.sqrt(vx * vx + vz * vz);
-        if (!inFluid && landed && Math.abs(vy) < 0.06 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.02) {
-            resting = true;
+        boolean still = !inFluid && onGround
+                && Math.abs(vy) < 0.06 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.02;
+        if (still) {
+            // Stop residual rotation/creep so a "still" body is truly motionless (gravity is kept,
+            // so it still drops if its support later disappears before it freezes).
             spinSpeed = 0.0f;
-            vx = vy = vz = 0.0;
-            restDropTarget = computeRestDrop(rot);
-            restStartAge = age;
+            vx = 0.0;
+            vz = 0.0;
+            if (stillTicks == 0) {
+                restStartAge = age;
+                restDropTarget = computeRestDrop(rot);
+            }
+            stillTicks++;
+            if (stillTicks >= settleTicks) {
+                freeze();
+            }
+        } else {
+            stillTicks = 0;
+            restStartAge = -1;
+            restDropTarget = 0.0;
         }
+    }
+
+    /** Drop physics but keep the current pose. */
+    private void freeze() {
+        frozen = true;
+        spinSpeed = 0.0f;
+        vx = vy = vz = 0.0;
+        if (restStartAge < 0) {
+            restStartAge = age;
+            restDropTarget = computeRestDrop(rot);
+        }
+    }
+
+    /** Begin a smooth dissolve; the corpse is removed once it completes. */
+    public void startFade(int durationTicks) {
+        if (fadeStartAge < 0) {
+            fadeStartAge = age;
+            fadeDurTicks = Math.max(1, durationTicks);
+        }
+    }
+
+    public boolean isFadingOut() {
+        return fadeStartAge >= 0;
     }
 
     /**
@@ -328,7 +386,7 @@ public final class Ragdoll {
 
         // Lower a settled body so it rests on the ground rather than hovering at its hitbox centre.
         double drop = 0.0;
-        if (resting && restStartAge >= 0) {
+        if (restStartAge >= 0) {
             float t = Mth.clamp((age + partialTick - restStartAge) / (float) RESTDROP_RAMP_TICKS, 0.0f, 1.0f);
             drop = restDropTarget * t;
         }
@@ -366,7 +424,7 @@ public final class Ragdoll {
             pose.mulPose(orientation);
             pose.translate(0.0, -halfHeight, 0.0);
 
-            RagdollRenderContext.set(skeleton);
+            RagdollRenderContext.set(Config.enableLimbs() ? skeleton : null);
             renderer.render(entity, 0.0f, partialTick, pose, source, light);
         } catch (Exception e) {
             // A foreign renderer may dislike being driven for a removed entity; never crash the game.
@@ -396,19 +454,29 @@ public final class Ragdoll {
         }
     }
 
-    /** 1.0 for most of the life, easing down to 0.0 over the last {@link #fadeTicks} ticks. */
+    /** Combined fade factor: the lifetime tail-fade and any forced dissolve, whichever is lower. */
     private float fadeAlpha(float partialTick) {
-        if (fadeTicks <= 0) {
-            return age >= maxAgeTicks ? 0.0f : 1.0f;
+        float a = 1.0f;
+        if (fadeTicks > 0) {
+            float remaining = maxAgeTicks - (age + partialTick);
+            if (remaining < fadeTicks) {
+                a = Math.min(a, Mth.clamp(remaining / fadeTicks, 0.0f, 1.0f));
+            }
         }
-        float remaining = maxAgeTicks - (age + partialTick);
-        if (remaining >= fadeTicks) {
-            return 1.0f;
+        if (fadeStartAge >= 0) {
+            float elapsed = (age + partialTick) - fadeStartAge;
+            a = Math.min(a, Mth.clamp(1.0f - elapsed / fadeDurTicks, 0.0f, 1.0f));
         }
-        return Mth.clamp(remaining / fadeTicks, 0.0f, 1.0f);
+        return a;
     }
 
     public boolean isFinished() {
-        return age >= maxAgeTicks || entity.level() != Minecraft.getInstance().level;
+        if (entity.level() != Minecraft.getInstance().level) {
+            return true;
+        }
+        if (age >= maxAgeTicks) {
+            return true;
+        }
+        return fadeStartAge >= 0 && (age - fadeStartAge) >= fadeDurTicks;
     }
 }
