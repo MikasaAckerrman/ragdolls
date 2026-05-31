@@ -51,6 +51,8 @@ public final class LimbSkeleton {
 
     private boolean settled = false;
     private boolean applied = false;
+    private boolean droppedRightItem = false; // held item fell to the ground (do not draw in hand)
+    private boolean droppedLeftItem = false;
 
     private LimbSkeleton(ModelPart[] bones, Limb[] role) {
         this.bones = bones;
@@ -155,6 +157,30 @@ public final class LimbSkeleton {
     public boolean isTorn(Limb limb) {
         for (int i = 0; i < bones.length; i++) {
             if (torn[i] && role[i] == limb) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Mark an arm's held item as dropped to the ground, so it is no longer drawn in that hand. */
+    public void markItemDropped(Limb arm) {
+        if (arm == Limb.RIGHT_ARM) {
+            droppedRightItem = true;
+        } else if (arm == Limb.LEFT_ARM) {
+            droppedLeftItem = true;
+        }
+    }
+
+    /** True if the item this arm was holding has dropped to the ground. */
+    public boolean isItemDropped(Limb arm) {
+        return arm == Limb.RIGHT_ARM ? droppedRightItem : arm == Limb.LEFT_ARM && droppedLeftItem;
+    }
+
+    /** True if this model has identifiable arms (humanoid) - i.e. hand-item drops make sense. */
+    public boolean hasArms() {
+        for (Limb r : role) {
+            if (r == Limb.RIGHT_ARM || r == Limb.LEFT_ARM) {
                 return true;
             }
         }

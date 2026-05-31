@@ -19,6 +19,9 @@ public final class Config {
     public static final ModConfigSpec.BooleanValue BURN_IN_LAVA;
     public static final ModConfigSpec.BooleanValue FLOAT_IN_WATER;
     public static final ModConfigSpec.BooleanValue ENABLE_GORE;
+    public static final ModConfigSpec.DoubleValue ITEM_DROP_CHANCE;
+    public static final ModConfigSpec.DoubleValue FLYING_LIMB_SECONDS;
+    public static final ModConfigSpec.DoubleValue DROPPED_ITEM_SECONDS;
     public static final ModConfigSpec.BooleanValue ENABLE_LIMBS;
     public static final ModConfigSpec.DoubleValue LIMB_FLOPPINESS;
     public static final ModConfigSpec.BooleanValue USE_ENTITY_COLLISION;
@@ -59,6 +62,17 @@ public final class Config {
                 .comment("Let you hit corpses: they get knocked around; a hard blow tears off limbs,",
                         "and a strong hit to the chest gibs the corpse in a burst of blood.")
                 .define("enableGore", true);
+        ITEM_DROP_CHANCE = b
+                .comment("Chance (0..1) that a held item visually drops to the ground instead of",
+                        "staying with the hand - both when an arm is torn off and, on death, from",
+                        "an intact corpse's hands. Dropped items fade away after their lifetime.")
+                .defineInRange("itemDropChance", 0.4, 0.0, 1.0);
+        FLYING_LIMB_SECONDS = b
+                .comment("How long a torn-off limb chunk flies/lies before it fades out, in seconds.")
+                .defineInRange("flyingLimbSeconds", 6.0, 0.5, 120.0);
+        DROPPED_ITEM_SECONDS = b
+                .comment("How long a dropped item stays before it fades out, in seconds.")
+                .defineInRange("droppedItemSeconds", 12.0, 0.5, 120.0);
         b.pop();
 
         b.push("limbs");
@@ -113,6 +127,20 @@ public final class Config {
 
     public static boolean enableGore() {
         return !SPEC.isLoaded() || ENABLE_GORE.get();
+    }
+
+    public static double itemDropChance() {
+        return SPEC.isLoaded() ? ITEM_DROP_CHANCE.get() : 0.4;
+    }
+
+    public static int flyingLimbTicks() {
+        double seconds = SPEC.isLoaded() ? FLYING_LIMB_SECONDS.get() : 6.0;
+        return Math.max(1, (int) Math.round(seconds * 20.0));
+    }
+
+    public static int droppedItemTicks() {
+        double seconds = SPEC.isLoaded() ? DROPPED_ITEM_SECONDS.get() : 12.0;
+        return Math.max(1, (int) Math.round(seconds * 20.0));
     }
 
     public static double knockbackMultiplier() {

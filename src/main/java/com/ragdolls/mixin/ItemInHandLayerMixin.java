@@ -37,11 +37,11 @@ public abstract class ItemInHandLayerMixin {
         LimbSkeleton.Limb hand = (arm == HumanoidArm.RIGHT) ? LimbSkeleton.Limb.RIGHT_ARM : LimbSkeleton.Limb.LEFT_ARM;
         LimbSkeleton.Limb solo = RagdollRenderContext.solo();
         if (solo != null) {
-            if (hand != solo) {
-                ci.cancel(); // a flying chunk draws only its own arm's item
+            if (hand != solo || skeleton.isItemDropped(hand)) {
+                ci.cancel(); // a flying chunk draws only its own arm's item, and not if it dropped
             }
-        } else if (skeleton.isTorn(hand)) {
-            ci.cancel(); // body: this arm (and its item) tore off and flew away
+        } else if (skeleton.isTorn(hand) || skeleton.isItemDropped(hand)) {
+            ci.cancel(); // body: this arm tore off, or its item dropped to the ground
         }
     }
 }

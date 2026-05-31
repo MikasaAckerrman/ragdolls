@@ -19,9 +19,11 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.material.FluidState;
@@ -77,6 +79,7 @@ public final class Ragdoll {
     private RagdollBodyEntity body;     // optional real collision body (mod-physics compatibility)
     private boolean collideErrorLogged = false;
     private final List<FlyingLimb> flyingLimbs = new ArrayList<>(); // torn-off limbs flying away
+    private final List<DroppedItem> droppedItems = new ArrayList<>(); // items dropped from the hands
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -201,6 +204,9 @@ public final class Ragdoll {
         if (Math.abs(this.spinSpeed) < 0.22f) {
             this.spinSpeed = (float) (sign * 0.22);
         }
+
+        // On death an intact corpse may visibly drop the item(s) it was holding.
+        maybeDropHandItemsOnDeath(dir);
     }
 
     public void tick(Level level) {
@@ -210,9 +216,21 @@ public final class Ragdoll {
         this.prevRot.set(rot);
         age++;
 
-        // Torn-off limbs fly on their own and keep going while the corpse freezes/fades.
-        for (int i = 0; i < flyingLimbs.size(); i++) {
-            flyingLimbs.get(i).tick(level);
+        // Torn-off limbs and dropped items live on their own (they fly/fall and fade out on their
+        // own timers) and keep going while the corpse freezes/fades.
+        for (int i = flyingLimbs.size() - 1; i >= 0; i--) {
+            FlyingLimb limb = flyingLimbs.get(i);
+            limb.tick(level);
+            if (limb.isFinished()) {
+                flyingLimbs.remove(i);
+            }
+        }
+        for (int i = droppedItems.size() - 1; i >= 0; i--) {
+            DroppedItem item = droppedItems.get(i);
+            item.tick(level);
+            if (item.isFinished()) {
+                droppedItems.remove(i);
+            }
         }
 
         // Limbs keep simulating until the body freezes (then they hold their final pose) or it
@@ -495,12 +513,56 @@ public final class Ragdoll {
             default -> { return; }
         }
         Vec3 centre = new Vec3(x, y + halfHeight, z);
+        // An arm's held item may instead fall to the ground rather than fly off with the arm.
+        if ((role == LimbSkeleton.Limb.RIGHT_ARM || role == LimbSkeleton.Limb.LEFT_ARM)
+                && !skeleton.isItemDropped(role)) {
+            ItemStack held = itemForArm(role);
+            if (!held.isEmpty() && random.nextDouble() < Config.itemDropChance()) {
+                skeleton.markItemDropped(role);
+                droppedItems.add(new DroppedItem(held.copy(), centre, DroppedItem.toss(dir, random)));
+            }
+        }
         double speed = 0.30 + random.nextDouble() * 0.15;
         Vec3 velocity = new Vec3(
                 dir.x * speed + (random.nextDouble() - 0.5) * 0.12,
                 0.22 + random.nextDouble() * 0.12,
                 dir.z * speed + (random.nextDouble() - 0.5) * 0.12);
         flyingLimbs.add(new FlyingLimb(entity, skeleton, role, halfHeight, centre, velocity, random));
+    }
+
+    /** The item rendered in the given arm (mirrors vanilla {@code ItemInHandLayer} hand mapping). */
+    private ItemStack itemForArm(LimbSkeleton.Limb arm) {
+        boolean rightIsMain = entity.getMainArm() == HumanoidArm.RIGHT;
+        if (arm == LimbSkeleton.Limb.RIGHT_ARM) {
+            return rightIsMain ? entity.getMainHandItem() : entity.getOffhandItem();
+        }
+        if (arm == LimbSkeleton.Limb.LEFT_ARM) {
+            return rightIsMain ? entity.getOffhandItem() : entity.getMainHandItem();
+        }
+        return ItemStack.EMPTY;
+    }
+
+    /** On death, an intact corpse may visibly drop the item(s) from its hands (configurable chance). */
+    private void maybeDropHandItemsOnDeath(Vec3 dir) {
+        if (skeleton == null || !skeleton.hasArms() || Config.itemDropChance() <= 0.0) {
+            return;
+        }
+        RandomSource random = entity.level().getRandom();
+        dropHandItem(LimbSkeleton.Limb.RIGHT_ARM, dir, random);
+        dropHandItem(LimbSkeleton.Limb.LEFT_ARM, dir, random);
+    }
+
+    private void dropHandItem(LimbSkeleton.Limb arm, Vec3 dir, RandomSource random) {
+        if (skeleton.isItemDropped(arm)) {
+            return;
+        }
+        ItemStack stack = itemForArm(arm);
+        if (stack.isEmpty() || random.nextDouble() >= Config.itemDropChance()) {
+            return;
+        }
+        skeleton.markItemDropped(arm);
+        Vec3 centre = new Vec3(x, y + halfHeight, z);
+        droppedItems.add(new DroppedItem(stack.copy(), centre, DroppedItem.toss(dir, random)));
     }
 
     /**
@@ -655,9 +717,13 @@ public final class Ragdoll {
             return;
         }
 
-        // Torn-off limbs are independent chunks in world space - draw them (fading with the corpse).
+        // Torn-off limbs and dropped items are independent chunks in world space - draw them
+        // (fading with the corpse, and on their own lifetimes).
         for (int i = 0; i < flyingLimbs.size(); i++) {
             flyingLimbs.get(i).render(mc, pose, buffers, cam, partialTick, alpha);
+        }
+        for (int i = 0; i < droppedItems.size(); i++) {
+            droppedItems.get(i).render(mc, pose, buffers, cam, partialTick, alpha);
         }
 
         double rx = Mth.lerp(partialTick, px, x);

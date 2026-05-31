@@ -55,12 +55,18 @@ final class FlyingLimb {
     private boolean resting = false;
     private boolean renderErrorLogged = false;
 
+    private int age = 0;
+    private final int maxLife;     // ticks before this chunk fades away on its own (~6s)
+    private final int fadeTicks;   // length of the transparent tail-fade
+
     FlyingLimb(LivingEntity entity, LimbSkeleton skeleton, LimbSkeleton.Limb role,
                double halfHeight, Vec3 centre, Vec3 velocity, RandomSource random) {
         this.entity = entity;
         this.skeleton = skeleton;
         this.role = role;
         this.halfHeight = halfHeight;
+        this.maxLife = Config.flyingLimbTicks();
+        this.fadeTicks = Math.min(Config.fadeTicks(), maxLife);
         this.cx = this.pcx = centre.x;
         this.cy = this.pcy = centre.y;
         this.cz = this.pcz = centre.z;
@@ -85,6 +91,7 @@ final class FlyingLimb {
         this.pcy = cy;
         this.pcz = cz;
         this.prevRot.set(rot);
+        age++;
 
         if (resting) {
             return; // settled on the ground; holds its pose at zero cost
@@ -134,7 +141,22 @@ final class FlyingLimb {
         }
     }
 
-    void render(Minecraft mc, PoseStack pose, MultiBufferSource buffers, Vec3 cam, float partialTick, float alpha) {
+    /** Done once it has lived out its lifetime; the corpse then drops it from its list. */
+    boolean isFinished() {
+        return age >= maxLife;
+    }
+
+    /** Smooth transparent tail-fade over the final {@link #fadeTicks} of the chunk's life. */
+    private float fadeAlpha(float partialTick) {
+        if (fadeTicks <= 0) {
+            return 1.0f;
+        }
+        float remaining = maxLife - (age + partialTick);
+        return remaining < fadeTicks ? Mth.clamp(remaining / fadeTicks, 0.0f, 1.0f) : 1.0f;
+    }
+
+    void render(Minecraft mc, PoseStack pose, MultiBufferSource buffers, Vec3 cam, float partialTick, float corpseAlpha) {
+        float alpha = Math.min(corpseAlpha, fadeAlpha(partialTick));
         if (alpha <= 0.02f) {
             return;
         }
