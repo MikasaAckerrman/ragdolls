@@ -403,14 +403,12 @@ public final class Ragdoll {
             if (restStartAge < 0) {
                 restStartAge = age;
             }
-            // Centre-of-mass topple: gravity at the CoM tips an unbalanced body further the way it
-            // already leans, so it keels over and lies down (then the torque vanishes). No scripted
-            // righting. While still standing we do NOT damp the spin (damping would kill the topple
-            // before it tips); we only bleed rotation once it is essentially flat, so it settles.
-            applyToppleTorque();
             if (!flat) {
-                // Standing/tilting: guarantee it keeps going over. A body that landed bolt-upright
-                // (topple ~0 there) gets a deterministic shove so it never just stands and jitters.
+                // Still standing/tilting: gravity at the CoM tips the body further the way it leans,
+                // so it keels over and lies down. We do NOT damp the spin here (damping would kill
+                // the topple before it tips). A body that landed bolt-upright (topple ~0 there) gets
+                // a deterministic shove so it never just stands and jitters.
+                applyToppleTorque();
                 double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
                 if (up.y() > 0.85f && angMag < 0.05) {
                     double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17 + Mth.floor(y) * 7) * 0.7;
@@ -418,7 +416,10 @@ public final class Ragdoll {
                     wz += Math.sin(a) * 0.06;
                 }
             } else {
-                applyAngularDrag(ANG_DRAG_GROUND); // lying down: settle the last of the roll
+                // Lying down: NO more topple torque (applying it near-flat would inject a permanent
+                // residual roll that never drops below the freeze threshold). Just bleed the last of
+                // the roll so the body comes fully to rest and can freeze.
+                applyAngularDrag(ANG_DRAG_GROUND);
             }
         } else {
             applyAngularDrag(ANG_DRAG_AIR);
