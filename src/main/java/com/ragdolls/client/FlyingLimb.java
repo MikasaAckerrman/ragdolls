@@ -194,6 +194,7 @@ final class FlyingLimb {
         float oldYHeadRot = entity.yHeadRot;
         float oldYHeadRotO = entity.yHeadRotO;
         int oldDeathTime = entity.deathTime;
+        int oldHurtTime = entity.hurtTime;
 
         entity.yBodyRot = entity.yBodyRotO = 0.0f;
         entity.setYRot(0.0f);
@@ -202,6 +203,7 @@ final class FlyingLimb {
         entity.xRotO = 0.0f;
         entity.yHeadRot = entity.yHeadRotO = 0.0f;
         entity.deathTime = 0;
+        entity.hurtTime = 0;
 
         dispatcher.setRenderShadow(false);
         pose.pushPose();
@@ -237,6 +239,7 @@ final class FlyingLimb {
             entity.yHeadRot = oldYHeadRot;
             entity.yHeadRotO = oldYHeadRotO;
             entity.deathTime = oldDeathTime;
+            entity.hurtTime = oldHurtTime;
         }
     }
 }

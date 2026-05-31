@@ -27,6 +27,7 @@ public final class RagdollClient {
 
     @SubscribeEvent
     public static void onClientTick(final ClientTickEvent.Post event) {
+        RagdollManager.updateGrab();
         RagdollManager.tick();
     }
 
@@ -34,6 +35,14 @@ public final class RagdollClient {
     @SubscribeEvent
     public static void onAttackInput(final InputEvent.InteractionKeyMappingTriggered event) {
         if (event.isAttack() && RagdollManager.handleAttack()) {
+            event.setCanceled(true);
+        }
+    }
+
+    /** Right-clicking a corpse grabs it; whip it around and release to throw it. */
+    @SubscribeEvent
+    public static void onUseInput(final InputEvent.InteractionKeyMappingTriggered event) {
+        if (event.isUseItem() && RagdollManager.tryGrab()) {
             event.setCanceled(true);
         }
     }

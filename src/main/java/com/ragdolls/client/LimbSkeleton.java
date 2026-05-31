@@ -32,11 +32,10 @@ public final class LimbSkeleton {
 
     private static final int MAX_BONES = 24;
 
-    private static final float SPRING = 0.34f;      // pull back toward the rest pose
-    private static final float DAMP = 0.55f;        // velocity damping (higher = less jitter)
-    private static final float GRAV_DRAPE = 0.30f;  // how far limbs sag toward world-down at rest
-    private static final float MAX_ANGLE = 0.45f;   // clamp (~26 deg) so limbs stay attached-looking
-    private static final float SETTLE_EPS = 0.0006f;
+    private static final float SPRING = 0.22f;      // softer -> a visible pendulum swing
+    private static final float DAMP = 0.40f;        // underdamped (limbs swing) but still settles
+    private static final float MAX_ANGLE = 1.30f;   // ~75 deg: limbs really dangle, full range
+    private static final float SETTLE_EPS = 0.0009f;
     private static final float WAKE_SPEED = 0.01f;  // body motion above this re-energises limbs
 
     private final ModelPart[] bones;
@@ -207,25 +206,26 @@ public final class LimbSkeleton {
             return; // fully asleep: no work until the body moves again
         }
 
-        // World-down expressed in the model's local frame: when the body is upright this is
-        // (0,-1,0) and adds no droop; as it tumbles onto its side/back the horizontal components
-        // grow, pulling the limbs to hang toward the actual ground for the body's final pose.
+        // World-down in the model's local frame: limbs hang toward the real ground for the body's
+        // current orientation. Upright -> arms straight down (= rest pose); lying on the side/back
+        // -> they swing out to dangle toward the actual ground.
         Vector3f down = orientation.transformInverse(new Vector3f(0.0f, -1.0f, 0.0f));
-        float drape = GRAV_DRAPE * floppiness;
-        float tgtPitch = Mth.clamp(down.z * drape, -MAX_ANGLE, MAX_ANGLE);
-        float tgtRoll = Mth.clamp(-down.x * drape, -MAX_ANGLE, MAX_ANGLE);
-
-        float kick = (bodySpin * 0.4f + bodySpeed * 1.0f) * floppiness;
+        float lx = down.x;
+        float lz = down.z;
+        float kick = (bodySpin * 0.5f + bodySpeed * 1.2f) * floppiness;
         float maxMag = 0.0f;
 
         for (int i = 0; i < bones.length; i++) {
+            float gain = gainFor(role[i]) * floppiness;
+            float tgtPitch = Mth.clamp(lz * gain, -MAX_ANGLE, MAX_ANGLE);
+            float tgtRoll = Mth.clamp(-lx * gain, -MAX_ANGLE, MAX_ANGLE);
             float phase = ((i & 1) == 0) ? 1.0f : -1.0f;
 
-            // Spring toward the gravity-draped target (not zero) so the settled pose matches the
-            // resting body instead of snapping back to the default standing pose.
-            float ax = -SPRING * (ox[i] - tgtPitch) - DAMP * vx[i] + phase * kick * 0.25f;
-            float ay = -SPRING * oy[i] - DAMP * vy[i] + phase * kick * 0.15f;
-            float az = -SPRING * (oz[i] - tgtRoll) - DAMP * vz[i] + phase * kick * 0.5f;
+            // Spring toward the gravity-hang target (not zero), with a low-damped swing so the limbs
+            // visibly dangle and lag the body instead of being a rigid doll.
+            float ax = -SPRING * (ox[i] - tgtPitch) - DAMP * vx[i] + phase * kick * 0.30f;
+            float ay = -SPRING * oy[i] - DAMP * vy[i] + phase * kick * 0.12f;
+            float az = -SPRING * (oz[i] - tgtRoll) - DAMP * vz[i] + phase * kick * 0.40f;
 
             vx[i] += ax;
             vy[i] += ay;
@@ -238,10 +238,26 @@ public final class LimbSkeleton {
             maxMag = Math.max(maxMag, Math.abs(vx[i]) + Math.abs(vy[i]) + Math.abs(vz[i]));
         }
 
-        // "Settled" = limbs have stopped moving (they are now resting at the draped target). While
-        // the body is still toppling, the target keeps shifting, so this stays false until it lies
-        // flat - which is exactly when the corpse is allowed to freeze.
+        // "Settled" = limbs have stopped moving (resting at their gravity-hang). While the body is
+        // still toppling, the target keeps shifting, so this stays false until it lies flat - which
+        // is exactly when the corpse is allowed to freeze.
         settled = bodyStill && maxMag < SETTLE_EPS;
+    }
+
+    /**
+     * How far a limb of this role may swing toward gravity (radians). The torso stays rigid (it is
+     * the body the whole ragdoll already rotates as one); arms hang the most, legs less, the head
+     * lolls a little; unknown (non-humanoid) parts get a mild sag since we cannot tell which is the
+     * torso.
+     */
+    private static float gainFor(Limb r) {
+        return switch (r) {
+            case BODY -> 0.0f;
+            case HEAD -> 0.45f;
+            case RIGHT_ARM, LEFT_ARM -> 1.15f;
+            case RIGHT_LEG, LEFT_LEG -> 0.80f;
+            default -> 0.45f;
+        };
     }
 
     /**

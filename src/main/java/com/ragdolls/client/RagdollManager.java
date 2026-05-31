@@ -8,6 +8,7 @@ import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
@@ -36,6 +37,9 @@ public final class RagdollManager {
 
     private static final int EVICT_FADE_TICKS = 8; // fast, smooth dissolve when over the cap
 
+    private static Ragdoll grabbed;   // corpse currently held by the player (RMB)
+    private static double grabDist;   // distance in front of the eyes the held corpse floats at
+
     private RagdollManager() {}
 
     public static void clear() {
@@ -43,6 +47,7 @@ public final class RagdollManager {
             ragdoll.dispose();
         }
         ACTIVE.clear();
+        grabbed = null;
     }
 
     /** Start the dissolve animation for the corpse belonging to {@code owner} (e.g. on respawn). */
@@ -158,6 +163,78 @@ public final class RagdollManager {
         }
         best.onHit(bestHit, look, player.getAttributeValue(Attributes.ATTACK_DAMAGE));
         return true;
+    }
+
+    /**
+     * RMB on a corpse grabs it (so it can be carried and thrown). Returns true if one was grabbed
+     * (so the vanilla use action is eaten). Uses the same "nothing closer under the crosshair" rule
+     * as attacking, so it never hijacks a right-click aimed at a block/entity in front of the body.
+     */
+    public static boolean tryGrab() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || mc.player == null || grabbed != null || ACTIVE.isEmpty()) {
+            return false;
+        }
+        Player player = mc.player;
+        Vec3 eye = player.getEyePosition(1.0f);
+        Vec3 look = player.getViewVector(1.0f);
+        double maxDist = 4.5;
+        HitResult hr = mc.hitResult;
+        if (hr != null && hr.getType() != HitResult.Type.MISS) {
+            maxDist = Math.min(maxDist, eye.distanceTo(hr.getLocation()));
+        }
+        Vec3 end = eye.add(look.scale(maxDist));
+
+        Ragdoll best = null;
+        Vec3 bestHit = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Ragdoll ragdoll : ACTIVE.values()) {
+            if (ragdoll.isFadingOut()) {
+                continue;
+            }
+            Optional<Vec3> hit = ragdoll.currentBox().inflate(0.1).clip(eye, end);
+            if (hit.isPresent()) {
+                double d = eye.distanceToSqr(hit.get());
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = ragdoll;
+                    bestHit = hit.get();
+                }
+            }
+        }
+        if (best == null) {
+            return false;
+        }
+        grabbed = best;
+        grabDist = Mth.clamp(eye.distanceTo(bestHit), 1.5, 4.0);
+        best.setGrabbed(true);
+        return true;
+    }
+
+    /**
+     * Drive the held corpse each client tick: it floats at a fixed distance in front of the eyes,
+     * and is thrown when the use key is released (velocity = how fast it was being whipped around).
+     */
+    public static void updateGrab() {
+        if (grabbed == null) {
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        Player player = mc.player;
+        if (player == null || grabbed.isFinished() || grabbed.isFadingOut() || !ACTIVE.containsValue(grabbed)) {
+            grabbed.setGrabbed(false);
+            grabbed = null;
+            return;
+        }
+        if (!mc.options.keyUse.isDown()) {
+            grabbed.release(1.2);
+            grabbed = null;
+            return;
+        }
+        Vec3 eye = player.getEyePosition(1.0f);
+        Vec3 look = player.getViewVector(1.0f);
+        Vec3 anchor = eye.add(look.scale(grabDist));
+        grabbed.setGrabAnchor(anchor.x, anchor.y, anchor.z);
     }
 
     public static void tick() {

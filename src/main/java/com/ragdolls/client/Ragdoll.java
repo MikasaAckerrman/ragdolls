@@ -19,6 +19,7 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MoverType;
@@ -63,7 +64,7 @@ public final class Ragdoll {
     private static final double WALL_BOUNCE = 0.30;
 
     private static final double WATER_DRAG = 0.82;
-    private static final double WATER_BUOYANCY = 0.028;
+    private static final double WATER_BUOYANCY = 0.045; // torso floats up to the surface
     private static final double WATER_CURRENT = 0.9;
     private static final double FLUID_MAX_SPEED = 0.25;
 
@@ -80,6 +81,9 @@ public final class Ragdoll {
     private boolean collideErrorLogged = false;
     private final List<FlyingLimb> flyingLimbs = new ArrayList<>(); // torn-off limbs flying away
     private final List<DroppedItem> droppedItems = new ArrayList<>(); // items dropped from the hands
+
+    private boolean grabbed = false;     // held by the player (RMB); follows an anchor, then thrown
+    private double grabX, grabY, grabZ;  // world anchor the held corpse follows
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -114,7 +118,8 @@ public final class Ragdoll {
         this.bbHeight = Math.max(0.2, entity.getBbHeight());
         this.halfHeight = this.bbHeight * 0.5;
         this.skeleton = LimbSkeleton.capture(model); // null if the model has no usable parts
-        this.fadeOnly = (this.skeleton == null);
+        boolean dissolve = isDissolveType(entity); // blobs / flyers / jittery quadrupeds: no ragdoll
+        this.fadeOnly = (this.skeleton == null) || dissolve;
 
         // Player corpses persist (forever unless burned); when the player respawns the client world
         // is rebuilt and the corpse is dropped automatically. Mob corpses use the configured life.
@@ -127,7 +132,11 @@ public final class Ragdoll {
         this.z = this.pz = entity.getZ();
 
         if (fadeOnly) {
-            // Mobs we cannot articulate just die with a clean dissolve where they fell.
+            // Mobs we cannot (or should not) articulate just dissolve where they fell. Blob/flyer/
+            // jittery types also get a clean death poof so it does not look like they vanish raw.
+            if (dissolve) {
+                spawnDeathPoof();
+            }
             startFade(Math.max(fadeTicks, 16));
             return;
         }
@@ -233,6 +242,28 @@ public final class Ragdoll {
             }
         }
 
+        // Held by the player: the body follows the grab anchor; the distance it travels each tick
+        // becomes its velocity, so whipping it and releasing throws it (Create-handle style).
+        if (grabbed) {
+            double tx = grabX;
+            double ty = grabY - halfHeight;
+            double tz = grabZ;
+            vx = tx - x;
+            vy = ty - y;
+            vz = tz - z;
+            x = tx;
+            y = ty;
+            z = tz;
+            if (body != null) {
+                body.setPos(x, y, z); // keep the collision body in sync so release doesn't snap back
+            }
+            if (skeleton != null && Config.enableLimbs()) {
+                float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
+                skeleton.tick(rot, speed, 0.0f, (float) Config.limbFloppiness());
+            }
+            return;
+        }
+
         // Limbs keep simulating until the body freezes (then they hold their final pose) or it
         // starts dissolving.
         if (skeleton != null && Config.enableLimbs() && !frozen && !isFadingOut()) {
@@ -276,6 +307,15 @@ public final class Ragdoll {
         }
 
         boolean inFluid = (inWater && Config.floatInWater()) || (inLava && Config.burnInLava());
+
+        // A corpse in water does not rot away while submerged: keep at least 60 s of life so it
+        // floats and drifts instead of vanishing (players already persist).
+        if (inWater && Config.floatInWater() && !(entity instanceof Player)) {
+            int floor = age + 60 * 20;
+            if (maxAgeTicks < floor) {
+                maxAgeTicks = floor;
+            }
+        }
 
         if (inFluid) {
             vy += WATER_BUOYANCY;
@@ -407,6 +447,55 @@ public final class Ragdoll {
     private void unfreeze() {
         frozen = false;
         restStartAge = -1;
+    }
+
+    /** Begin/stop being carried by the player. On grab the anchor starts at the body's own centre. */
+    public void setGrabbed(boolean g) {
+        this.grabbed = g;
+        if (g) {
+            frozen = false;
+            restStartAge = -1;
+            grabX = x;
+            grabY = y + halfHeight;
+            grabZ = z;
+        }
+    }
+
+    public boolean isGrabbed() {
+        return grabbed;
+    }
+
+    /** Update the world point the held corpse follows this tick. */
+    public void setGrabAnchor(double cx, double cy, double cz) {
+        this.grabX = cx;
+        this.grabY = cy;
+        this.grabZ = cz;
+    }
+
+    /**
+     * Release a held corpse and throw it with whatever velocity it had while being whipped around,
+     * scaled and clamped, plus a tumble in the throw direction (faster whip -> faster, spinnier).
+     */
+    public void release(double scale) {
+        grabbed = false;
+        vx *= scale;
+        vy *= scale;
+        vz *= scale;
+        double h = Math.sqrt(vx * vx + vz * vz);
+        double maxH = 2.0;
+        if (h > maxH) {
+            double f = maxH / h;
+            vx *= f;
+            vz *= f;
+            h = maxH;
+        }
+        vy = Mth.clamp(vy, -1.5, 1.5);
+        Vec3 dir = new Vec3(vx, 0.0, vz);
+        Vec3 axis = dir.lengthSqr() > 1.0e-4 ? new Vec3(0.0, 1.0, 0.0).cross(dir).normalize() : new Vec3(1.0, 0.0, 0.0);
+        spinX = (float) axis.x;
+        spinY = (float) axis.y;
+        spinZ = (float) axis.z;
+        spinSpeed = (float) Mth.clamp(h * 0.9, 0.0, 0.8);
     }
 
     /**
@@ -611,6 +700,36 @@ public final class Ragdoll {
     }
 
     /**
+     * Types that ragdoll badly (gelatinous blobs, flyers, and jittery quadruped death animations
+     * such as horses) are not articulated: they get a graceful dissolve + death poof instead. Keeps
+     * the corpses that actually look good (humanoids, common animals) and drops the broken ones.
+     */
+    private static boolean isDissolveType(LivingEntity e) {
+        EntityType<?> t = e.getType();
+        return t == EntityType.SLIME || t == EntityType.MAGMA_CUBE || t == EntityType.GHAST
+                || t == EntityType.PHANTOM || t == EntityType.SHULKER || t == EntityType.VEX
+                || t == EntityType.BAT || t == EntityType.BEE || t == EntityType.ALLAY
+                || t == EntityType.PARROT || t == EntityType.HORSE || t == EntityType.DONKEY
+                || t == EntityType.MULE || t == EntityType.SKELETON_HORSE
+                || t == EntityType.ZOMBIE_HORSE || t == EntityType.LLAMA
+                || t == EntityType.TRADER_LLAMA || t == EntityType.CAMEL;
+    }
+
+    /** A one-shot puff of vanilla death smoke for dissolve-only mobs. */
+    private void spawnDeathPoof() {
+        Level level = entity.level();
+        RandomSource random = level.getRandom();
+        for (int i = 0; i < 12; i++) {
+            double ox = (random.nextDouble() - 0.5) * bbWidth;
+            double oy = random.nextDouble() * bbHeight;
+            double oz = (random.nextDouble() - 0.5) * bbWidth;
+            level.addParticle(ParticleTypes.POOF, x + ox, y + oy, z + oz,
+                    (random.nextDouble() - 0.5) * 0.05, 0.05 + random.nextDouble() * 0.05,
+                    (random.nextDouble() - 0.5) * 0.05);
+        }
+    }
+
+    /**
      * How far to lower the model so its lowest point touches the ground for the current orientation.
      * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
      */
@@ -766,6 +885,7 @@ public final class Ragdoll {
         float oldYHeadRot = entity.yHeadRot;
         float oldYHeadRotO = entity.yHeadRotO;
         int oldDeathTime = entity.deathTime;
+        int oldHurtTime = entity.hurtTime;
 
         entity.yBodyRot = entity.yBodyRotO = 0.0f;
         entity.setYRot(0.0f);
@@ -774,6 +894,7 @@ public final class Ragdoll {
         entity.xRotO = 0.0f;
         entity.yHeadRot = entity.yHeadRotO = 0.0f;
         entity.deathTime = 0;
+        entity.hurtTime = 0; // a mob killed by a hit keeps hurtTime>0 -> permanent red tint; clear it
 
         dispatcher.setRenderShadow(false);
         pose.pushPose();
@@ -819,6 +940,7 @@ public final class Ragdoll {
             entity.yHeadRot = oldYHeadRot;
             entity.yHeadRotO = oldYHeadRotO;
             entity.deathTime = oldDeathTime;
+            entity.hurtTime = oldHurtTime;
         }
     }
 
