@@ -56,8 +56,8 @@ import java.util.List;
  */
 public final class Ragdoll {
 
-    private static final double GRAVITY = 0.045;
-    private static final double LINEAR_DRAG = 0.985;
+    private static final double GRAVITY = 0.08;     // vanilla-mob gravity (was floaty at 0.045)
+    private static final double AIR_DRAG_V = 0.98;  // vertical air resistance (terminal ~4 b/t)
     private static final double GROUND_BOUNCE = 0.22;
     private static final double GROUND_FRICTION = 0.88; // keep inertia: corpse slides, never snap-stops
     private static final double SPIN_DRAG = 0.98;       // gentle airborne spin bleed (keeps tumble)
@@ -337,10 +337,11 @@ public final class Ragdoll {
             vy = Mth.clamp(vy, -FLUID_MAX_SPEED, FLUID_MAX_SPEED);
             vz = Mth.clamp(vz, -FLUID_MAX_SPEED, FLUID_MAX_SPEED);
         } else {
-            vy -= GRAVITY;
-            vx *= LINEAR_DRAG;
-            vy *= LINEAR_DRAG;
-            vz *= LINEAR_DRAG;
+            // Gravity pulls the body down at real weight; vertical air drag gives a sane terminal
+            // speed. Horizontal motion keeps its inertia (almost no drag) so a thrown body carries.
+            vy = (vy - GRAVITY) * AIR_DRAG_V;
+            vx *= 0.995;
+            vz *= 0.995;
         }
 
         // Move + collide against the world (and, with useEntityCollision, mod physics contraptions).
@@ -549,20 +550,21 @@ public final class Ragdoll {
         double dh = Math.hypot(hitPoint.x - x, hitPoint.z - z);
         boolean chestCentre = dh < bbWidth * 0.4 && localY > 0.35 && localY < 0.78;
 
-        // Wake and shove it. Force scales with weapon damage but is divided by the corpse's weight,
-        // so a heavy body barely moves while a light one is sent flying.
+        // Wake and shove it. The knockback is a proper launch (damage-driven) divided by weight, so
+        // a light body flies and a heavy one barely budges; the spin is a modest topple, not the
+        // main effect (a punch should mostly push, only lightly spin).
         unfreeze();
-        double push = Mth.clamp(0.16 * weaponDamage / mass, 0.04, 0.8);
+        double push = Mth.clamp(0.32 * weaponDamage / mass, 0.08, 1.2);
         vx += dir.x * push;
         vz += dir.z * push;
-        vy = Math.max(vy, 0.10 + 0.06 / mass);
+        vy = Math.max(vy, 0.16 + 0.08 / mass);
 
         Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
         axis = axis.lengthSqr() > 1.0e-4 ? axis.normalize() : new Vec3(1.0, 0.0, 0.0);
         spinX = (float) axis.x;
         spinY = (float) axis.y;
         spinZ = (float) axis.z;
-        spinSpeed = (float) ((localY >= 0.5 ? 1.0 : -1.0) * Mth.clamp(push * 0.8 + 0.1, 0.1, 0.5));
+        spinSpeed = (float) ((localY >= 0.5 ? 1.0 : -1.0) * Mth.clamp(push * 0.3 + 0.05, 0.05, 0.3));
 
         if (!Config.enableGore()) {
             return; // gore disabled: knock it around only, no blood / tearing
@@ -749,12 +751,24 @@ public final class Ragdoll {
      * (so mod contraptions can carry it); otherwise it uses Minecraft's swept block collision.
      */
     private Vec3 collideMove(Level level, Vec3 wanted) {
+        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
         RagdollBodyEntity b = this.body;
         if (b != null) {
             try {
                 b.setDeltaMovement(wanted.x, wanted.y, wanted.z);
                 b.move(MoverType.SELF, b.getDeltaMovement());
-                return new Vec3(b.getX() - x, b.getY() - y, b.getZ() - z);
+                Vec3 bodyMoved = new Vec3(b.getX() - x, b.getY() - y, b.getZ() - z);
+
+                // Robustness: the helper body can snag (spawn inside geometry / catch a ledge) and
+                // report ~0 motion, which would leave the corpse hanging in mid-air. If it failed to
+                // fall while we wanted to AND vanilla collision says nothing is actually below,
+                // trust the built-in sweep for this tick and resync the body to it.
+                if (wanted.y < 0.0 && bodyMoved.y > wanted.y * 0.1 && !isSupported(level)) {
+                    Vec3 swept = Entity.collideBoundingBox(null, wanted, box, level, List.of());
+                    b.setPos(x + swept.x, y + swept.y, z + swept.z);
+                    return swept;
+                }
+                return bodyMoved;
             } catch (Throwable t) {
                 if (!collideErrorLogged) {
                     collideErrorLogged = true;
@@ -763,7 +777,6 @@ public final class Ragdoll {
                 disposeBody();
             }
         }
-        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
         return Entity.collideBoundingBox(null, wanted, box, level, List.of());
     }
 

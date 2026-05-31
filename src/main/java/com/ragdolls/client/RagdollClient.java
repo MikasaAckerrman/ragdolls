@@ -26,6 +26,21 @@ public final class RagdollClient {
     }
 
     @SubscribeEvent
+    public static void onClientTickPre(final ClientTickEvent.Pre event) {
+        // While carrying a corpse, drain the use-key click queue every tick so vanilla never starts
+        // using/placing an item from held RMB (the per-click input event cannot stop continuous
+        // use that Minecraft drives directly from keyUse). Cheap: just consumes queued clicks.
+        if (RagdollManager.isGrabbing()) {
+            net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+            if (mc.options != null) {
+                while (mc.options.keyUse.consumeClick()) {
+                    // discard
+                }
+            }
+        }
+    }
+
+    @SubscribeEvent
     public static void onClientTick(final ClientTickEvent.Post event) {
         RagdollManager.updateGrab();
         RagdollManager.tick();
@@ -35,6 +50,7 @@ public final class RagdollClient {
     @SubscribeEvent
     public static void onAttackInput(final InputEvent.InteractionKeyMappingTriggered event) {
         if (event.isAttack() && RagdollManager.handleAttack()) {
+            event.setSwingHand(false);
             event.setCanceled(true);
         }
     }
@@ -43,8 +59,10 @@ public final class RagdollClient {
     @SubscribeEvent
     public static void onUseInput(final InputEvent.InteractionKeyMappingTriggered event) {
         // Swallow the use action both when first grabbing and for as long as a corpse is held, so
-        // holding RMB to whip it never also eats/places/uses an item.
+        // holding RMB to whip it never also eats/places/uses an item or swings the hand. Canceling
+        // alone is not enough - we must also stop the hand swing the event would otherwise trigger.
         if (event.isUseItem() && (RagdollManager.isGrabbing() || RagdollManager.tryGrab())) {
+            event.setSwingHand(false);
             event.setCanceled(true);
         }
     }

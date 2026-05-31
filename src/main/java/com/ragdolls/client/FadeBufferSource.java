@@ -112,11 +112,19 @@ final class FadeBufferSource implements MultiBufferSource {
         return optional instanceof Optional<?> o ? (ResourceLocation) o.orElse(null) : null;
     }
 
-    /** Forwards every vertex unchanged except for a scaled alpha channel. */
+    /**
+     * Forwards every vertex but scales its alpha by the fade factor, plus a small per-region jitter
+     * derived from the vertex UV so different parts of the texture lose opacity at slightly
+     * different moments (a soft "dissolve" rather than a uniform dim). The bias band is tiny
+     * (+-12%) so over a 0.5 s fade it reads as a gentle, non-uniform dissolve, not noise.
+     */
     private static final class FadeVertexConsumer implements VertexConsumer {
+
+        private static final float JITTER = 0.12f; // +-12% per-region timing spread
 
         private final VertexConsumer parent;
         private final float alpha;
+        private float u, v; // last UV seen for the current vertex
 
         FadeVertexConsumer(VertexConsumer parent, float alpha) {
             this.parent = parent;
@@ -131,12 +139,18 @@ final class FadeBufferSource implements MultiBufferSource {
 
         @Override
         public VertexConsumer setColor(int red, int green, int blue, int a) {
-            parent.setColor(red, green, blue, Mth.clamp((int) (a * alpha), 0, 255));
+            // Cheap, stable pseudo-random in [-1,1] from the texel coords: regions fade staggered.
+            float n = (Mth.sin(u * 91.7f + v * 47.3f) * 43758.5453f);
+            float bias = ((n - Mth.floor(n)) * 2.0f - 1.0f) * JITTER;
+            float a2 = Mth.clamp(alpha * (1.0f + bias), 0.0f, 1.0f);
+            parent.setColor(red, green, blue, Mth.clamp((int) (a * a2), 0, 255));
             return this;
         }
 
         @Override
         public VertexConsumer setUv(float u, float v) {
+            this.u = u;
+            this.v = v;
             parent.setUv(u, v);
             return this;
         }

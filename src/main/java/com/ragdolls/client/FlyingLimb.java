@@ -31,8 +31,8 @@ import java.util.List;
  */
 final class FlyingLimb {
 
-    private static final double GRAVITY = 0.045;
-    private static final double DRAG = 0.98;
+    private static final double GRAVITY = 0.08;     // real weight, matching the body (was floaty)
+    private static final double DRAG = 0.99;
     private static final double GROUND_BOUNCE = 0.30;
     private static final double GROUND_FRICTION = 0.72;
     private static final double SPIN_DRAG = 0.985;

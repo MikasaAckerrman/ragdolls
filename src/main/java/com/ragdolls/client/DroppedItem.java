@@ -29,8 +29,8 @@ import java.util.List;
  */
 final class DroppedItem {
 
-    private static final double GRAVITY = 0.045;
-    private static final double DRAG = 0.98;
+    private static final double GRAVITY = 0.08;     // real weight (was floaty at 0.045)
+    private static final double DRAG = 0.99;
     private static final double GROUND_BOUNCE = 0.25;
     private static final double GROUND_FRICTION = 0.6;
     private static final double HALF_BOX = 0.12;
