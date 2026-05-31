@@ -62,7 +62,7 @@ public final class Ragdoll {
     private static final double GROUND_FRICTION = 0.88; // keep inertia: corpse slides, never snap-stops
     private static final double ANG_DRAG_AIR = 0.99;    // airborne angular damping (keeps the tumble)
     private static final double ANG_DRAG_GROUND = 0.78; // ground contact bleeds rotation toward rest
-    private static final double TOPPLE_GAIN = 0.020;    // how strongly gravity tips an unbalanced body
+    private static final double TOPPLE_GAIN = 0.045;    // how strongly gravity tips an unbalanced body
     private static final double MAX_ANG = 0.6;          // clamp angular speed (rad/tick) for stability
     private static final double WALL_BOUNCE = 0.30;
     private static final double PLAYER_VOLUME = 0.6 * 0.6 * 1.8; // reference "mass" (Steve-sized)
@@ -395,25 +395,31 @@ public final class Ragdoll {
             grounded = isSupported(level);
         }
 
+        // How far the body still is from lying flat (its "up" axis points up = still standing).
+        Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot);
+        boolean flat = up.y() < 0.30f; // |up| nearly horizontal -> the body is lying down
+
         if (grounded && !inFluid) {
             if (restStartAge < 0) {
                 restStartAge = age;
             }
-            // Centre-of-mass topple: if the body's "up" axis is not vertical, gravity exerts a
-            // torque that tips it further over in exactly the direction its weight already leans -
-            // so it rolls/keels the way a real body would, then settles once it lies flat. No forced
-            // "matryoshka" righting; the body just follows where its mass wants to go.
-            Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot);
-            double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
-            if (up.y() > 0.95f && angMag < 0.02) {
-                // Landed bolt-upright and barely turning: nudge it off-balance (deterministic from
-                // position) so a corpse never just stands there - it always keels over and lies down.
-                double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17) * 0.5;
-                wx += Math.cos(a) * 0.03;
-                wz += Math.sin(a) * 0.03;
-            }
+            // Centre-of-mass topple: gravity at the CoM tips an unbalanced body further the way it
+            // already leans, so it keels over and lies down (then the torque vanishes). No scripted
+            // righting. While still standing we do NOT damp the spin (damping would kill the topple
+            // before it tips); we only bleed rotation once it is essentially flat, so it settles.
             applyToppleTorque();
-            applyAngularDrag(ANG_DRAG_GROUND);
+            if (!flat) {
+                // Standing/tilting: guarantee it keeps going over. A body that landed bolt-upright
+                // (topple ~0 there) gets a deterministic shove so it never just stands and jitters.
+                double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
+                if (up.y() > 0.85f && angMag < 0.05) {
+                    double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17 + Mth.floor(y) * 7) * 0.7;
+                    wx += Math.cos(a) * 0.06;
+                    wz += Math.sin(a) * 0.06;
+                }
+            } else {
+                applyAngularDrag(ANG_DRAG_GROUND); // lying down: settle the last of the roll
+            }
         } else {
             applyAngularDrag(ANG_DRAG_AIR);
             // Airborne (flying/falling, not resting and not in fluid): pause the disappearance timer
@@ -426,12 +432,11 @@ public final class Ragdoll {
             }
         }
 
-        // Freeze ONLY once every bit of motion has died out: linear velocity, the tumble, AND the
-        // floppy limbs. Until then keep simulating so the body finishes its inertia naturally
-        // instead of stopping the instant it touches the floor.
+        // Freeze ONLY once it is lying flat AND all motion has died out (linear + tumble + limbs).
+        // Requiring "flat" is what stops a corpse freezing bolt-upright and jittering in place.
         double angNow = Math.sqrt(wx * wx + wy * wy + wz * wz);
-        boolean motionless = grounded && !inFluid
-                && Math.abs(vy) < 0.04 && horizontal < 0.02 && angNow < 0.01;
+        boolean motionless = grounded && !inFluid && flat
+                && Math.abs(vy) < 0.04 && horizontal < 0.02 && angNow < 0.012;
         if (motionless && (skeleton == null || !Config.enableLimbs() || skeleton.isSettled())) {
             freeze();
         }
@@ -822,24 +827,16 @@ public final class Ragdoll {
      * (so mod contraptions can carry it); otherwise it uses Minecraft's swept block collision.
      */
     private Vec3 collideMove(Level level, Vec3 wanted) {
-        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
         RagdollBodyEntity b = this.body;
         if (b != null) {
             try {
                 b.setDeltaMovement(wanted.x, wanted.y, wanted.z);
                 b.move(MoverType.SELF, b.getDeltaMovement());
-                Vec3 bodyMoved = new Vec3(b.getX() - x, b.getY() - y, b.getZ() - z);
-
-                // Robustness: the helper body can snag (spawn inside geometry / catch a ledge) and
-                // report ~0 motion, which would leave the corpse hanging in mid-air. If it failed to
-                // fall while we wanted to AND vanilla collision says nothing is actually below,
-                // trust the built-in sweep for this tick and resync the body to it.
-                if (wanted.y < 0.0 && bodyMoved.y > wanted.y * 0.1 && !isSupported(level)) {
-                    Vec3 swept = Entity.collideBoundingBox(null, wanted, box, level, List.of());
-                    b.setPos(x + swept.x, y + swept.y, z + swept.z);
-                    return swept;
-                }
-                return bodyMoved;
+                // Trust the helper body's resolved motion: this is what lets physics-mod contraptions
+                // (Create Aeronautics / Sable, Valkyrien Skies) carry the corpse. We must NOT second
+                // -guess it with a vanilla block sweep - doing so dropped corpses straight through any
+                // non-vanilla (contraption) surface, since vanilla sees no block there.
+                return new Vec3(b.getX() - x, b.getY() - y, b.getZ() - z);
             } catch (Throwable t) {
                 if (!collideErrorLogged) {
                     collideErrorLogged = true;
@@ -848,6 +845,7 @@ public final class Ragdoll {
                 disposeBody();
             }
         }
+        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
         return Entity.collideBoundingBox(null, wanted, box, level, List.of());
     }
 
