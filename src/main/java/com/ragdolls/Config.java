@@ -21,6 +21,7 @@ public final class Config {
     public static final ModConfigSpec.BooleanValue FLOAT_IN_WATER;
     public static final ModConfigSpec.BooleanValue ENABLE_LIMBS;
     public static final ModConfigSpec.DoubleValue LIMB_FLOPPINESS;
+    public static final ModConfigSpec.BooleanValue USE_ENTITY_COLLISION;
 
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
@@ -70,6 +71,15 @@ public final class Config {
                 .defineInRange("limbFloppiness", 1.0, 0.0, 3.0);
         b.pop();
 
+        b.push("compat");
+        USE_ENTITY_COLLISION = b
+                .comment("EXPERIMENTAL. Collide corpses through a real (invisible, silent) helper",
+                        "entity so physics mods (Create Aeronautics / Sable, Valkyrien Skies) carry",
+                        "them on moving contraptions instead of letting them fall through. Slightly",
+                        "heavier; leave off unless you use such mods.")
+                .define("useEntityCollision", false);
+        b.pop();
+
         SPEC = b.build();
     }
 
@@ -116,5 +126,9 @@ public final class Config {
 
     public static double limbFloppiness() {
         return SPEC.isLoaded() ? LIMB_FLOPPINESS.get() : 1.0;
+    }
+
+    public static boolean useEntityCollision() {
+        return SPEC.isLoaded() && USE_ENTITY_COLLISION.get();
     }
 }

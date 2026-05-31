@@ -3,8 +3,10 @@ package com.ragdolls.client;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.ragdolls.Config;
 import com.ragdolls.Ragdolls;
+import com.ragdolls.entity.RagdollBodyEntity;
 import com.ragdolls.network.DeathPayload;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -16,6 +18,7 @@ import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -65,6 +68,8 @@ public final class Ragdoll {
     private final LimbSkeleton skeleton;
     private final boolean fadeOnly;     // non-articulable model -> graceful dissolve, no tumble
     private final int settleTicks;
+    private RagdollBodyEntity body;     // optional real collision body (mod-physics compatibility)
+    private boolean collideErrorLogged = false;
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -115,6 +120,21 @@ public final class Ragdoll {
             // Mobs we cannot articulate just die with a clean dissolve where they fell.
             startFade(Math.max(fadeTicks, 16));
             return;
+        }
+
+        // Optional real collision body so physics mods carry the corpse on their contraptions.
+        if (Config.useEntityCollision() && entity.level() instanceof ClientLevel clientLevel) {
+            try {
+                RagdollBodyEntity b = new RagdollBodyEntity(Ragdolls.RAGDOLL_BODY.get(), clientLevel);
+                b.setBodySize((float) bbWidth, (float) bbHeight);
+                b.setId(RagdollBodyEntity.nextClientId());
+                b.setPos(x, y, z);
+                clientLevel.addEntity(b);
+                this.body = b;
+            } catch (Throwable t) {
+                this.body = null;
+                Ragdolls.LOGGER.warn("Failed to create collision body; using built-in collision", t);
+            }
         }
 
         Vec3 dir = new Vec3(payload.dirX(), 0.0, payload.dirZ());
@@ -231,11 +251,9 @@ public final class Ragdoll {
             vz *= LINEAR_DRAG;
         }
 
-        // Swept collision against the world. Box is the entity's footprint centred on the corpse,
-        // so it rests on floors and ledges and is stopped by walls just like a live entity.
+        // Move + collide against the world (and, with useEntityCollision, mod physics contraptions).
         Vec3 wanted = new Vec3(vx, vy, vz);
-        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
-        Vec3 moved = Entity.collideBoundingBox(null, wanted, box, level, List.of());
+        Vec3 moved = collideMove(level, wanted);
 
         boolean hitX = moved.x != wanted.x;
         boolean hitY = moved.y != wanted.y;
@@ -325,6 +343,48 @@ public final class Ragdoll {
         double az = Math.abs(new Vector3f(0.0f, 0.0f, 1.0f).rotate(q).y());
         double verticalHalfExtent = ax * (bbWidth * 0.5) + ay * halfHeight + az * (bbWidth * 0.5);
         return Math.max(0.0, halfHeight - verticalHalfExtent);
+    }
+
+    /**
+     * Resolve one tick of movement. With a collision body the corpse follows the body's position
+     * (so mod contraptions can carry it); otherwise it uses Minecraft's swept block collision.
+     */
+    private Vec3 collideMove(Level level, Vec3 wanted) {
+        RagdollBodyEntity b = this.body;
+        if (b != null) {
+            try {
+                b.setDeltaMovement(wanted.x, wanted.y, wanted.z);
+                b.move(MoverType.SELF, b.getDeltaMovement());
+                return new Vec3(b.getX() - x, b.getY() - y, b.getZ() - z);
+            } catch (Throwable t) {
+                if (!collideErrorLogged) {
+                    collideErrorLogged = true;
+                    Ragdolls.LOGGER.warn("Entity collision failed; falling back to built-in collision", t);
+                }
+                disposeBody();
+            }
+        }
+        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
+        return Entity.collideBoundingBox(null, wanted, box, level, List.of());
+    }
+
+    /** Remove the collision body from the world; called when the corpse is discarded. */
+    public void dispose() {
+        disposeBody();
+    }
+
+    private void disposeBody() {
+        RagdollBodyEntity b = this.body;
+        if (b != null) {
+            try {
+                if (b.level() instanceof ClientLevel clientLevel) {
+                    clientLevel.removeEntity(b.getId(), Entity.RemovalReason.DISCARDED);
+                }
+            } catch (Throwable ignored) {
+                // best effort
+            }
+            this.body = null;
+        }
     }
 
     /** True while there is a collidable block directly beneath the corpse's footprint. */

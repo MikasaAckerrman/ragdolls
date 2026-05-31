@@ -35,6 +35,9 @@ public final class RagdollManager {
     private RagdollManager() {}
 
     public static void clear() {
+        for (Ragdoll ragdoll : ACTIVE.values()) {
+            ragdoll.dispose();
+        }
         ACTIVE.clear();
     }
 
@@ -97,7 +100,7 @@ public final class RagdollManager {
     public static void tick() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null) {
-            ACTIVE.clear();
+            clear();
             return;
         }
         if (mc.isPaused()) {
@@ -108,6 +111,7 @@ public final class RagdollManager {
             Ragdoll ragdoll = it.next().getValue();
             ragdoll.tick(mc.level);
             if (ragdoll.isFinished()) {
+                ragdoll.dispose();
                 it.remove();
             }
         }

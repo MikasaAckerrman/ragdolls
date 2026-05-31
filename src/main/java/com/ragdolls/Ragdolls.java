@@ -1,7 +1,11 @@
 package com.ragdolls;
 
 import com.mojang.logging.LogUtils;
+import com.ragdolls.entity.RagdollBodyEntity;
 import com.ragdolls.network.DeathPayload;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.MobCategory;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
@@ -10,7 +14,10 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+import net.neoforged.neoforge.registries.DeferredRegister;
 import org.slf4j.Logger;
+
+import java.util.function.Supplier;
 
 /**
  * Entry point for the Ragdolls mod.
@@ -27,9 +34,23 @@ public final class Ragdolls {
     /** Shared mod logger. Reused across all classes to avoid duplicate logger instances. */
     public static final Logger LOGGER = LogUtils.getLogger();
 
+    private static final DeferredRegister<EntityType<?>> ENTITIES =
+            DeferredRegister.create(Registries.ENTITY_TYPE, MODID);
+
+    /** Invisible collision-body entity (only used when {@code useEntityCollision} is enabled). */
+    public static final Supplier<EntityType<RagdollBodyEntity>> RAGDOLL_BODY = ENTITIES.register(
+            "ragdoll_body",
+            () -> EntityType.Builder.<RagdollBodyEntity>of(RagdollBodyEntity::new, MobCategory.MISC)
+                    .sized(0.6f, 1.8f)
+                    .build("ragdoll_body"));
+
     public Ragdolls(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.CLIENT, Config.SPEC);
+        ENTITIES.register(modBus);
         modBus.addListener(this::registerPayloads);
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            com.ragdolls.client.ClientSetup.init(modBus);
+        }
         LOGGER.info("Ragdolls loaded (dist={}): client-side rigid-body corpses ready", FMLEnvironment.dist);
     }
 
