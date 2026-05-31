@@ -13,6 +13,7 @@ public final class Config {
 
     public static final ModConfigSpec.DoubleValue LIFETIME_SECONDS;
     public static final ModConfigSpec.DoubleValue FADE_SECONDS;
+    public static final ModConfigSpec.DoubleValue KNOCKBACK_MULTIPLIER;
     public static final ModConfigSpec.IntValue MAX_RAGDOLLS;
     public static final ModConfigSpec.DoubleValue MAX_RENDER_DISTANCE;
     public static final ModConfigSpec.BooleanValue BURN_IN_LAVA;
@@ -28,6 +29,9 @@ public final class Config {
         FADE_SECONDS = b
                 .comment("Duration of the smooth shrink/fade-out at the end of a corpse's life, in seconds.")
                 .defineInRange("fadeSeconds", 1.5, 0.0, 30.0);
+        KNOCKBACK_MULTIPLIER = b
+                .comment("Multiplier for how far corpses are thrown by the killing blow (1.0 = realistic).")
+                .defineInRange("knockbackMultiplier", 1.0, 0.0, 5.0);
         b.pop();
 
         b.push("performance");
@@ -78,5 +82,9 @@ public final class Config {
 
     public static boolean floatInWater() {
         return !SPEC.isLoaded() || FLOAT_IN_WATER.get();
+    }
+
+    public static double knockbackMultiplier() {
+        return SPEC.isLoaded() ? KNOCKBACK_MULTIPLIER.get() : 1.0;
     }
 }

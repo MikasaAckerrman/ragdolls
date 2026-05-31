@@ -13,13 +13,22 @@ import net.minecraft.resources.ResourceLocation;
  * @param dirX      x of the (horizontal) push direction, normalized server-side
  * @param dirY      reserved vertical component (currently 0)
  * @param dirZ      z of the push direction
- * @param strength  0..~1 magnitude of the blow (higher for critical hits)
- * @param hitHeight 0..1 normalized height of the impact along the body (0 = feet, 1 = head)
+ * @param damage    actual final damage of the killing blow (drives launch distance realistically)
+ * @param hitHeight 0..1 normalized height of the impact along the body (0 = feet/legs, 1 = head)
+ * @param cause     how the entity died (see CAUSE_* constants) -> shapes the launch impulse
  * @param critical  whether the killing blow was a critical hit
+ * @param onFire    whether the entity was burning at death (corpse carries flames)
  */
 public record DeathPayload(int entityId, float dirX, float dirY, float dirZ,
-                           float strength, float hitHeight, boolean critical)
+                           float damage, float hitHeight, int cause,
+                           boolean critical, boolean onFire)
         implements CustomPacketPayload {
+
+    public static final int CAUSE_GENERIC = 0;
+    public static final int CAUSE_PROJECTILE = 1;
+    public static final int CAUSE_EXPLOSION = 2;
+    public static final int CAUSE_FIRE = 3;
+    public static final int CAUSE_FALL = 4;
 
     public static final Type<DeathPayload> TYPE =
             new Type<>(ResourceLocation.fromNamespaceAndPath(Ragdolls.MODID, "death"));
@@ -32,9 +41,11 @@ public record DeathPayload(int entityId, float dirX, float dirY, float dirZ,
         buf.writeFloat(dirX);
         buf.writeFloat(dirY);
         buf.writeFloat(dirZ);
-        buf.writeFloat(strength);
+        buf.writeFloat(damage);
         buf.writeFloat(hitHeight);
+        buf.writeVarInt(cause);
         buf.writeBoolean(critical);
+        buf.writeBoolean(onFire);
     }
 
     public static DeathPayload decode(FriendlyByteBuf buf) {
@@ -42,10 +53,12 @@ public record DeathPayload(int entityId, float dirX, float dirY, float dirZ,
         float dx = buf.readFloat();
         float dy = buf.readFloat();
         float dz = buf.readFloat();
-        float strength = buf.readFloat();
+        float damage = buf.readFloat();
         float hitHeight = buf.readFloat();
+        int cause = buf.readVarInt();
         boolean critical = buf.readBoolean();
-        return new DeathPayload(id, dx, dy, dz, strength, hitHeight, critical);
+        boolean onFire = buf.readBoolean();
+        return new DeathPayload(id, dx, dy, dz, damage, hitHeight, cause, critical, onFire);
     }
 
     @Override

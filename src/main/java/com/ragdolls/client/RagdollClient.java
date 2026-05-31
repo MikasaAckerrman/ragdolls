@@ -7,7 +7,6 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
-import net.neoforged.neoforge.client.event.RenderLivingEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 /**
@@ -33,17 +32,6 @@ public final class RagdollClient {
     public static void onRenderLevelStage(final RenderLevelStageEvent event) {
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_ENTITIES) {
             RagdollManager.render(event);
-        }
-    }
-
-    /**
-     * Suppress the vanilla death animation for any entity we have turned into a ragdoll, except
-     * while we are explicitly rendering the ragdoll ourselves.
-     */
-    @SubscribeEvent
-    public static void onRenderLivingPre(final RenderLivingEvent.Pre<?, ?> event) {
-        if (!RagdollManager.isRendering() && RagdollManager.isRagdolled(event.getEntity().getId())) {
-            event.setCanceled(true);
         }
     }
 }

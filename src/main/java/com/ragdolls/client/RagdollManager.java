@@ -19,32 +19,17 @@ import java.util.Map;
 /**
  * Owns every active client-side ragdoll, drives their physics each client tick and renders them
  * once per frame after the regular entities have been drawn.
+ *
+ * <p>When a ragdoll is created the original entity is removed from the client world. That single
+ * step makes vanilla stop drawing its model, its fire and its shadow at the death spot (no
+ * leftovers), while the ragdoll keeps the entity instance alive purely as render data.</p>
  */
 public final class RagdollManager {
 
     // Insertion-ordered so the eldest corpse can be evicted first when the cap is hit.
     private static final Map<Integer, Ragdoll> ACTIVE = new LinkedHashMap<>();
 
-    /**
-     * True while we are rendering our own ragdolls. Used so the {@link RagdollClient} render-cancel
-     * hook does not also cancel the explicit render we issue here (it only suppresses the vanilla
-     * death animation in the normal entity pass).
-     */
-    private static boolean rendering = false;
-
     private RagdollManager() {}
-
-    public static boolean isRendering() {
-        return rendering;
-    }
-
-    static void setRendering(boolean value) {
-        rendering = value;
-    }
-
-    public static boolean isRagdolled(int entityId) {
-        return ACTIVE.containsKey(entityId);
-    }
 
     public static void clear() {
         ACTIVE.clear();
@@ -64,9 +49,8 @@ public final class RagdollManager {
         if (entity == mc.player) {
             return;
         }
-        // Only entities drawn by a LivingEntityRenderer can have their vanilla death animation
-        // suppressed (via RenderLivingEvent). Anything else (e.g. the Ender Dragon, which uses a
-        // bespoke multi-part renderer) is skipped so we never double-render it.
+        // Only entities drawn by a LivingEntityRenderer are supported. Anything else (e.g. the Ender
+        // Dragon, which uses a bespoke multi-part renderer) is skipped.
         EntityRenderer<?> renderer = mc.getEntityRenderDispatcher().getRenderer(entity);
         if (!(renderer instanceof LivingEntityRenderer<?, ?>)) {
             Ragdolls.LOGGER.debug("Skip ragdoll id={}: renderer {} is not a LivingEntityRenderer (e.g. boss)",
@@ -87,6 +71,11 @@ public final class RagdollManager {
         }
 
         ACTIVE.put(entity.getId(), new Ragdoll(living, payload));
+
+        // Take the entity out of the world: stops the vanilla model, fire and shadow render at the
+        // death position. The ragdoll holds its own reference for rendering.
+        mc.level.removeEntity(entity.getId(), Entity.RemovalReason.DISCARDED);
+
         Ragdolls.LOGGER.debug("Spawned ragdoll id={} type={} (active={})",
                 entity.getId(), entity.getType(), ACTIVE.size());
     }
@@ -123,13 +112,8 @@ public final class RagdollManager {
         Vec3 cam = mc.gameRenderer.getMainCamera().getPosition();
         MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
 
-        setRendering(true);
-        try {
-            for (Ragdoll ragdoll : ACTIVE.values()) {
-                ragdoll.render(mc, event.getPoseStack(), buffers, cam, partialTick);
-            }
-        } finally {
-            setRendering(false);
+        for (Ragdoll ragdoll : ACTIVE.values()) {
+            ragdoll.render(mc, event.getPoseStack(), buffers, cam, partialTick);
         }
         buffers.endBatch();
     }

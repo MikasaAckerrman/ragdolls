@@ -24,16 +24,17 @@ import org.joml.Quaternionf;
 import java.util.List;
 
 /**
- * A single rigid-body corpse. The entire entity model is kept intact ("glued") and treated as one
+ * A single rigid-body corpse. The whole entity model is kept intact ("glued") and treated as one
  * solid object with a position, linear velocity, an orientation quaternion and a spin axis/speed.
  *
- * <p>Collision against the world (floors, walls, ceilings, ledges) is delegated to Minecraft's own
- * swept block-collision routine, so it is exactly as accurate and as cheap as vanilla entity
- * movement. Lava burns the corpse away; water makes it float and drift with the current.</p>
+ * <p>Collision uses Minecraft's own swept block collision, so the corpse is stopped by floors,
+ * walls, ceilings and rests on ledges exactly like a live entity. Lava burns it away; water makes
+ * it float and drift with the current. When it settles on solid ground it stops simulating until
+ * either it expires or the block beneath it disappears, in which case it wakes and keeps falling.</p>
  *
- * <p>The simulation is intentionally a tiny custom rigid body rather than a physics-engine
- * dependency: one moving box per corpse, frozen the moment it comes to rest, which keeps the cost
- * negligible and avoids native libraries / mod conflicts.</p>
+ * <p>The launch impulse is derived from the actual killing damage (so a hit does not fling a body
+ * across the map), shaped by where it was hit and what killed it. It is a deliberately tiny custom
+ * rigid body, not a physics engine, to stay dependency-free and mod-compatible.</p>
  */
 public final class Ragdoll {
 
@@ -70,6 +71,7 @@ public final class Ragdoll {
     private int fadeTicks;
     private boolean resting = false;
     private boolean burning = false;
+    private boolean consumed = false;
     private boolean renderErrorLogged = false;
 
     public Ragdoll(LivingEntity entity, DeathPayload payload) {
@@ -80,6 +82,7 @@ public final class Ragdoll {
 
         this.maxAgeTicks = Config.lifetimeTicks();
         this.fadeTicks = Math.min(Config.fadeTicks(), maxAgeTicks);
+        this.burning = payload.onFire();
 
         this.x = this.px = entity.getX();
         this.y = this.py = entity.getY();
@@ -91,13 +94,38 @@ public final class Ragdoll {
         }
         dir = dir.normalize();
 
-        double power = 0.25 + payload.strength() * 0.45;
-        this.vx = dir.x * power;
-        this.vz = dir.z * power;
-        this.vy = 0.18 + payload.strength() * 0.25 + (payload.critical() ? 0.15 : 0.0);
+        float damage = payload.damage();
+        int cause = payload.cause();
+        double kb = Config.knockbackMultiplier();
 
-        // Spin axis is horizontal and perpendicular to the push -> the body tumbles head over heels
-        // in the direction it is thrown.
+        // Realistic horizontal travel distance (blocks): a strong netherite-crit (~15 dmg) lands
+        // about a metre away; bigger hits throw further, capped so nothing flies across the map.
+        double dist = Mth.clamp(0.5 + Math.max(0.0, damage - 5.0) * 0.06, 0.35, 6.0);
+        double vyPop = 0.10 + Math.min(damage * 0.004, 0.10);
+        double spinScale = 1.0;
+        switch (cause) {
+            case DeathPayload.CAUSE_EXPLOSION -> {
+                dist *= 1.25;
+                vyPop = 0.24 + Math.min(damage * 0.005, 0.16);
+                spinScale = 1.6;
+            }
+            case DeathPayload.CAUSE_PROJECTILE -> vyPop = 0.07; // flatter push along the shot
+            case DeathPayload.CAUSE_FALL -> {
+                dist *= 0.35;
+                vyPop = 0.04;
+                spinScale = 1.3;
+            }
+            default -> { }
+        }
+        dist *= kb;
+
+        double horizVel = Mth.clamp(dist * 0.085, 0.0, 0.7);
+        this.vx = dir.x * horizVel;
+        this.vz = dir.z * horizVel;
+        this.vy = vyPop + (payload.critical() ? 0.03 : 0.0);
+
+        // Spin axis is horizontal and perpendicular to the push -> the body tumbles in the direction
+        // it is thrown. A hit high on the body (head) topples it forward, a low hit (legs) backward.
         Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
         if (axis.lengthSqr() < 1.0e-4) {
             axis = new Vec3(1.0, 0.0, 0.0);
@@ -107,11 +135,11 @@ public final class Ragdoll {
         this.spinY = (float) axis.y;
         this.spinZ = (float) axis.z;
 
-        // A hit above the centre of mass flips the body forward, a low hit flips it backward.
-        double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 .. 1
+        double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 (feet) .. +1 (head)
         double sign = lever >= 0.0 ? 1.0 : -1.0;
-        this.spinSpeed = (float) (sign * (0.12 + payload.strength() * 0.25
-                + Math.abs(lever) * 0.10 + (payload.critical() ? 0.10 : 0.0)));
+        this.spinSpeed = (float) Mth.clamp(
+                sign * (0.10 + Math.min(damage * 0.008, 0.18) + Math.abs(lever) * 0.08) * spinScale,
+                -0.6, 0.6);
     }
 
     public void tick(Level level) {
@@ -121,10 +149,14 @@ public final class Ragdoll {
         this.prevRot.set(rot);
         age++;
 
-        // Once a corpse is asleep on solid ground we stop simulating it entirely (no block lookups,
-        // no allocations) until it expires. This is the main performance guard.
+        // Settled on solid ground: behave like a static dead entity (no simulation cost). Every so
+        // often check the block underneath; if its support vanished, wake up and keep falling.
         if (resting) {
-            return;
+            if (age % 10 == 0 && !isSupported(level)) {
+                resting = false;
+            } else {
+                return;
+            }
         }
 
         BlockPos comPos = BlockPos.containing(x, y + halfHeight, z);
@@ -133,7 +165,7 @@ public final class Ragdoll {
         boolean inWater = fluid.is(FluidTags.WATER);
 
         if (inLava && Config.burnInLava()) {
-            startBurning();
+            igniteConsume();
         }
         if (burning) {
             spawnBurnParticles(level);
@@ -206,9 +238,18 @@ public final class Ragdoll {
         }
     }
 
-    private void startBurning() {
-        if (!burning) {
-            burning = true;
+    /** True while there is a collidable block directly beneath the corpse's footprint. */
+    private boolean isSupported(Level level) {
+        AABB probe = new AABB(
+                x - bbWidth * 0.5, y - 0.08, z - bbWidth * 0.5,
+                x + bbWidth * 0.5, y + 0.02, z + bbWidth * 0.5);
+        return level.getBlockCollisions(null, probe).iterator().hasNext();
+    }
+
+    private void igniteConsume() {
+        burning = true;
+        if (!consumed) {
+            consumed = true;
             maxAgeTicks = Math.min(maxAgeTicks, age + BURN_TICKS);
             fadeTicks = Math.min(Math.max(fadeTicks, BURN_TICKS / 2), maxAgeTicks);
         }
@@ -233,8 +274,8 @@ public final class Ragdoll {
             return;
         }
 
-        float scale = fadeScale(partialTick);
-        if (scale <= 0.0f) {
+        float alpha = fadeAlpha(partialTick);
+        if (alpha <= 0.02f) {
             return;
         }
 
@@ -253,6 +294,10 @@ public final class Ragdoll {
 
         Quaternionf orientation = new Quaternionf(prevRot).slerp(rot, partialTick);
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry + halfHeight, rz));
+
+        // While fading, route rendering through a buffer source that scales vertex alpha so the
+        // corpse turns transparent before it is removed.
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
 
         // Freeze every state the renderer would use to rotate/animate the model so it draws upright
         // and undeformed; our quaternion then orients the whole body as one rigid piece.
@@ -278,21 +323,18 @@ public final class Ragdoll {
         pose.pushPose();
         try {
             pose.translate(rx - cam.x, ry - cam.y, rz - cam.z);
-            // Rotate (and fade-scale) about the body's centre of mass for a natural tumble.
+            // Rotate about the body's centre of mass for a natural tumble.
             pose.translate(0.0, halfHeight, 0.0);
             pose.mulPose(orientation);
-            if (scale != 1.0f) {
-                pose.scale(scale, scale, scale);
-            }
             pose.translate(0.0, -halfHeight, 0.0);
 
-            renderer.render(entity, 0.0f, partialTick, pose, buffers, light);
+            renderer.render(entity, 0.0f, partialTick, pose, source, light);
         } catch (Exception e) {
             // A foreign renderer may dislike being driven for a removed entity; never crash the game.
             // Log once per corpse (WARN) so issues are diagnosable without spamming every frame.
             if (!renderErrorLogged) {
                 renderErrorLogged = true;
-                Ragdolls.LOGGER.warn("Ragdoll render failed for entity type {} (will keep simulating, render disabled)",
+                Ragdolls.LOGGER.warn("Ragdoll render failed for entity type {} (render disabled, still simulating)",
                         entity.getType(), e);
             }
         } finally {
@@ -312,7 +354,7 @@ public final class Ragdoll {
     }
 
     /** 1.0 for most of the life, easing down to 0.0 over the last {@link #fadeTicks} ticks. */
-    private float fadeScale(float partialTick) {
+    private float fadeAlpha(float partialTick) {
         if (fadeTicks <= 0) {
             return age >= maxAgeTicks ? 0.0f : 1.0f;
         }
