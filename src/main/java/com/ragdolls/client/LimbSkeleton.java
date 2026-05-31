@@ -3,8 +3,10 @@ package com.ragdolls.client;
 import com.ragdolls.mixin.AgeableListModelAccessor;
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.model.HierarchicalModel;
+import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
@@ -22,6 +24,12 @@ import java.util.List;
  */
 public final class LimbSkeleton {
 
+    /**
+     * Anatomical role of a captured bone. Known only for humanoids (where it lets us hide the
+     * matching armor piece / held item when a limb is torn off); everything else is {@link #OTHER}.
+     */
+    public enum Limb { HEAD, BODY, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG, OTHER }
+
     private static final int MAX_BONES = 24;
 
     private static final float SPRING = 0.34f;      // pull back toward the rest pose
@@ -32,6 +40,7 @@ public final class LimbSkeleton {
     private static final float WAKE_SPEED = 0.01f;  // body motion above this re-energises limbs
 
     private final ModelPart[] bones;
+    private final Limb[] role;             // anatomical role per bone (for gore: armor/item hiding)
     private final float[] ox, oy, oz;     // current angular offset per bone (rad)
     private final float[] vx, vy, vz;     // angular velocity per bone
     private final float[] pox, poy, poz;  // previous offset (for render interpolation)
@@ -43,8 +52,9 @@ public final class LimbSkeleton {
     private boolean settled = false;
     private boolean applied = false;
 
-    private LimbSkeleton(ModelPart[] bones) {
+    private LimbSkeleton(ModelPart[] bones, Limb[] role) {
         this.bones = bones;
+        this.role = role;
         int n = bones.length;
         this.ox = new float[n];
         this.oy = new float[n];
@@ -68,27 +78,47 @@ public final class LimbSkeleton {
      */
     public static LimbSkeleton capture(EntityModel<?> model) {
         List<ModelPart> parts = new ArrayList<>();
+        List<Limb> roles = new ArrayList<>();
         try {
-            if (model instanceof HierarchicalModel<?> hierarchical) {
+            if (model instanceof HumanoidModel<?> h) {
+                // Known anatomy -> we can hide the matching armor/held item when a limb is torn.
+                addRole(parts, roles, h.head, Limb.HEAD);
+                addRole(parts, roles, h.hat, Limb.HEAD);
+                addRole(parts, roles, h.body, Limb.BODY);
+                addRole(parts, roles, h.rightArm, Limb.RIGHT_ARM);
+                addRole(parts, roles, h.leftArm, Limb.LEFT_ARM);
+                addRole(parts, roles, h.rightLeg, Limb.RIGHT_LEG);
+                addRole(parts, roles, h.leftLeg, Limb.LEFT_LEG);
+            } else if (model instanceof HierarchicalModel<?> hierarchical) {
                 ModelPart root = hierarchical.root();
                 root.getAllParts().forEach(part -> {
                     if (part != root && parts.size() < MAX_BONES) {
                         parts.add(part);
+                        roles.add(Limb.OTHER);
                     }
                 });
             } else if (model instanceof AgeableListModelAccessor accessor) {
-                accessor.ragdolls$headParts().forEach(p -> add(parts, p));
-                accessor.ragdolls$bodyParts().forEach(p -> add(parts, p));
+                accessor.ragdolls$headParts().forEach(p -> add(parts, roles, p));
+                accessor.ragdolls$bodyParts().forEach(p -> add(parts, roles, p));
             }
         } catch (Throwable ignored) {
             return null;
         }
-        return parts.isEmpty() ? null : new LimbSkeleton(parts.toArray(new ModelPart[0]));
+        return parts.isEmpty() ? null
+                : new LimbSkeleton(parts.toArray(new ModelPart[0]), roles.toArray(new Limb[0]));
     }
 
-    private static void add(List<ModelPart> parts, ModelPart part) {
+    private static void addRole(List<ModelPart> parts, List<Limb> roles, ModelPart part, Limb r) {
+        if (part != null && parts.size() < MAX_BONES) {
+            parts.add(part);
+            roles.add(r);
+        }
+    }
+
+    private static void add(List<ModelPart> parts, List<Limb> roles, ModelPart part) {
         if (parts.size() < MAX_BONES) {
             parts.add(part);
+            roles.add(Limb.OTHER);
         }
     }
 
@@ -101,17 +131,30 @@ public final class LimbSkeleton {
         return bones.length;
     }
 
-    /** Tear off a random still-attached limb (it becomes hidden). Returns false if none are left. */
-    public boolean tearRandom(net.minecraft.util.RandomSource random) {
+    /**
+     * Tear off a random still-attached limb (it becomes hidden). Returns the anatomical role of the
+     * limb that was torn, or {@code null} if none remained.
+     */
+    public Limb tearRandom(RandomSource random) {
         int remaining = bones.length - tornCount;
         if (remaining <= 0) {
-            return false;
+            return null;
         }
         int pick = random.nextInt(remaining);
         for (int i = 0; i < bones.length; i++) {
             if (!torn[i] && pick-- == 0) {
                 torn[i] = true;
                 tornCount++;
+                return role[i];
+            }
+        }
+        return null;
+    }
+
+    /** True if a torn-off bone has the given anatomical role (drives armor/held-item hiding). */
+    public boolean isTorn(Limb limb) {
+        for (int i = 0; i < bones.length; i++) {
+            if (torn[i] && role[i] == limb) {
                 return true;
             }
         }

@@ -459,7 +459,7 @@ public final class Ragdoll {
             int tears = relative >= 0.9 ? 2 : 1;
             boolean tore = false;
             for (int i = 0; i < tears; i++) {
-                tore |= skeleton.tearRandom(random);
+                tore |= (skeleton.tearRandom(random) != null);
             }
             spawnBlood(level, tore ? 10 : 5, hitPoint, dir, tore);
         } else {
