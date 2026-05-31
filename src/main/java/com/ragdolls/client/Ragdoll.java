@@ -789,7 +789,10 @@ public final class Ragdoll {
             }
             pose.translate(0.0, -halfHeight, 0.0);
 
-            RagdollRenderContext.set(Config.enableLimbs() ? skeleton : null);
+            // Always hand over the skeleton (when present) so torn-off limbs / dropped items are
+            // hidden on the body. The floppy sway is governed separately by whether the skeleton is
+            // ticked (gated by enableLimbs), so a disabled-limbs corpse simply has zero offsets.
+            RagdollRenderContext.set(skeleton);
             renderer.render(entity, 0.0f, partialTick, pose, source, light);
         } catch (Exception e) {
             // A foreign renderer may dislike being driven for a removed entity; never crash the game.

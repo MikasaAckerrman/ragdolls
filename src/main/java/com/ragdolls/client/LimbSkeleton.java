@@ -129,10 +129,6 @@ public final class LimbSkeleton {
         return settled;
     }
 
-    public int boneCount() {
-        return bones.length;
-    }
-
     /**
      * Tear off a random still-attached limb (it becomes hidden). Returns the anatomical role of the
      * limb that was torn, or {@code null} if none remained.
