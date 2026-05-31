@@ -5,6 +5,7 @@ import com.ragdolls.Config;
 import com.ragdolls.Ragdolls;
 import com.ragdolls.network.DeathPayload;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
@@ -57,6 +58,7 @@ public final class Ragdoll {
     private final double bbWidth;
     private final double bbHeight;
     private final double halfHeight;
+    private final LimbSkeleton skeleton;
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -81,11 +83,12 @@ public final class Ragdoll {
     private double restDropTarget = 0.0;
     private int restStartAge = -1;
 
-    public Ragdoll(LivingEntity entity, DeathPayload payload) {
+    public Ragdoll(LivingEntity entity, DeathPayload payload, EntityModel<?> model) {
         this.entity = entity;
         this.bbWidth = Math.max(0.2, entity.getBbWidth());
         this.bbHeight = Math.max(0.2, entity.getBbHeight());
         this.halfHeight = this.bbHeight * 0.5;
+        this.skeleton = Config.enableLimbs() ? LimbSkeleton.capture(model) : null;
 
         this.maxAgeTicks = Config.lifetimeTicks();
         this.fadeTicks = Math.min(Config.fadeTicks(), maxAgeTicks);
@@ -155,6 +158,11 @@ public final class Ragdoll {
         this.pz = z;
         this.prevRot.set(rot);
         age++;
+
+        if (skeleton != null) {
+            float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
+            skeleton.tick(speed, Math.abs(spinSpeed), (float) Config.limbFloppiness());
+        }
 
         // Settled on solid ground: behave like a static dead entity (no simulation cost). Every so
         // often check the block underneath; if its support vanished, wake up and keep falling.
@@ -358,6 +366,7 @@ public final class Ragdoll {
             pose.mulPose(orientation);
             pose.translate(0.0, -halfHeight, 0.0);
 
+            RagdollRenderContext.set(skeleton);
             renderer.render(entity, 0.0f, partialTick, pose, source, light);
         } catch (Exception e) {
             // A foreign renderer may dislike being driven for a removed entity; never crash the game.
@@ -370,6 +379,10 @@ public final class Ragdoll {
         } finally {
             pose.popPose();
             dispatcher.setRenderShadow(true);
+            RagdollRenderContext.clear();
+            if (skeleton != null) {
+                skeleton.restore();
+            }
 
             entity.yBodyRot = oldYBodyRot;
             entity.yBodyRotO = oldYBodyRotO;

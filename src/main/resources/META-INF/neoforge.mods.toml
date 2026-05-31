@@ -3,6 +3,9 @@ loaderVersion = "[1,)"
 license = "MIT"
 issueTrackerURL = "https://github.com/MikasaAckerrman/ragdolls/issues"
 
+[[mixins]]
+config = "ragdolls.mixins.json"
+
 [[mods]]
 modId = "ragdolls"
 version = "1.0.0"

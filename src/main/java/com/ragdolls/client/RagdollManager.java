@@ -4,6 +4,7 @@ import com.ragdolls.Config;
 import com.ragdolls.Ragdolls;
 import com.ragdolls.network.DeathPayload;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
@@ -52,7 +53,7 @@ public final class RagdollManager {
         // Only entities drawn by a LivingEntityRenderer are supported. Anything else (e.g. the Ender
         // Dragon, which uses a bespoke multi-part renderer) is skipped.
         EntityRenderer<?> renderer = mc.getEntityRenderDispatcher().getRenderer(entity);
-        if (!(renderer instanceof LivingEntityRenderer<?, ?>)) {
+        if (!(renderer instanceof LivingEntityRenderer<?, ?> livingRenderer)) {
             Ragdolls.LOGGER.debug("Skip ragdoll id={}: renderer {} is not a LivingEntityRenderer (e.g. boss)",
                     payload.entityId(), renderer == null ? "null" : renderer.getClass().getSimpleName());
             return;
@@ -70,7 +71,8 @@ public final class RagdollManager {
             Ragdolls.LOGGER.debug("Evicted oldest ragdoll to honour cap ({})", max);
         }
 
-        ACTIVE.put(entity.getId(), new Ragdoll(living, payload));
+        EntityModel<?> model = livingRenderer.getModel();
+        ACTIVE.put(entity.getId(), new Ragdoll(living, payload, model));
 
         // Take the entity out of the world: stops the vanilla model, fire and shadow render at the
         // death position. The ragdoll holds its own reference for rendering.

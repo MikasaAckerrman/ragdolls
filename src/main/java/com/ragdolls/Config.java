@@ -18,6 +18,8 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue MAX_RENDER_DISTANCE;
     public static final ModConfigSpec.BooleanValue BURN_IN_LAVA;
     public static final ModConfigSpec.BooleanValue FLOAT_IN_WATER;
+    public static final ModConfigSpec.BooleanValue ENABLE_LIMBS;
+    public static final ModConfigSpec.DoubleValue LIMB_FLOPPINESS;
 
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
@@ -53,6 +55,16 @@ public final class Config {
                 .define("floatInWater", true);
         b.pop();
 
+        b.push("limbs");
+        ENABLE_LIMBS = b
+                .comment("Procedural floppy limbs: arms/legs/head dangle and lag like a rag doll.",
+                        "Only affects entities using vanilla model parts (most mobs); others stay rigid.")
+                .define("enableLimbs", true);
+        LIMB_FLOPPINESS = b
+                .comment("How loose the limbs are. 0 = stiff, 1 = natural, higher = floppier.")
+                .defineInRange("limbFloppiness", 1.0, 0.0, 3.0);
+        b.pop();
+
         SPEC = b.build();
     }
 
@@ -86,5 +98,13 @@ public final class Config {
 
     public static double knockbackMultiplier() {
         return SPEC.isLoaded() ? KNOCKBACK_MULTIPLIER.get() : 1.0;
+    }
+
+    public static boolean enableLimbs() {
+        return !SPEC.isLoaded() || ENABLE_LIMBS.get();
+    }
+
+    public static double limbFloppiness() {
+        return SPEC.isLoaded() ? LIMB_FLOPPINESS.get() : 1.0;
     }
 }
