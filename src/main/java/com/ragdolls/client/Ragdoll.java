@@ -99,6 +99,11 @@ public final class Ragdoll {
     private final Quaternionf rot = new Quaternionf();
     private final Quaternionf prevRot = new Quaternionf();
 
+    // Reusable scratch objects so the per-tick physics and per-frame render allocate nothing (no GC
+    // churn with many corpses). Never escape this instance; both are single-threaded (client only).
+    private final Quaternionf scratchQ = new Quaternionf();
+    private final Vector3f scratchV = new Vector3f();
+
     // World-space angular velocity (rad/tick). The body rotates about this vector each tick, so
     // tumbles from several impulses compose naturally and a gravity-topple torque (about the centre
     // of mass) can tip it over in whatever direction its weight leans - real inertia, not a preset.
@@ -362,9 +367,9 @@ public final class Ragdoll {
         // tick, its direction the axis). Several tumbles thus compose naturally.
         double angSpeed = Math.sqrt(wx * wx + wy * wy + wz * wz);
         if (angSpeed > 1.0e-5) {
-            rot.premul(new Quaternionf().fromAxisAngleRad(
-                    (float) (wx / angSpeed), (float) (wy / angSpeed), (float) (wz / angSpeed),
-                    (float) angSpeed));
+            rot.premul(scratchQ.rotationAxis(
+                    (float) angSpeed,
+                    (float) (wx / angSpeed), (float) (wy / angSpeed), (float) (wz / angSpeed)));
         }
 
         if (hitX) {
@@ -398,7 +403,7 @@ public final class Ragdoll {
             // torque that tips it further over in exactly the direction its weight already leans -
             // so it rolls/keels the way a real body would, then settles once it lies flat. No forced
             // "matryoshka" righting; the body just follows where its mass wants to go.
-            Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(rot);
+            Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot);
             double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
             if (up.y() > 0.95f && angMag < 0.02) {
                 // Landed bolt-upright and barely turning: nudge it off-balance (deterministic from
@@ -440,7 +445,7 @@ public final class Ragdoll {
      * keels over the way its weight already leans - emergent, never a scripted righting.
      */
     private void applyToppleTorque() {
-        Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(rot); // body up-axis in world space
+        Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot); // body up-axis in world space
         // Only an upright-ish body topples; once it is on its side/face (up.y <= 0) it has reached a
         // lying pose, so we stop adding torque and let drag settle it (no spinning past flat).
         if (up.y() <= 0.05f) {
@@ -805,9 +810,9 @@ public final class Ragdoll {
      * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
      */
     private double computeRestDrop(Quaternionf q) {
-        double ax = Math.abs(new Vector3f(1.0f, 0.0f, 0.0f).rotate(q).y());
-        double ay = Math.abs(new Vector3f(0.0f, 1.0f, 0.0f).rotate(q).y());
-        double az = Math.abs(new Vector3f(0.0f, 0.0f, 1.0f).rotate(q).y());
+        double ax = Math.abs(scratchV.set(1.0f, 0.0f, 0.0f).rotate(q).y());
+        double ay = Math.abs(scratchV.set(0.0f, 1.0f, 0.0f).rotate(q).y());
+        double az = Math.abs(scratchV.set(0.0f, 0.0f, 1.0f).rotate(q).y());
         double verticalHalfExtent = ax * (bbWidth * 0.5) + ay * halfHeight + az * (bbWidth * 0.5);
         return Math.max(0.0, halfHeight - verticalHalfExtent);
     }
@@ -934,7 +939,7 @@ public final class Ragdoll {
             }
         }
 
-        Quaternionf orientation = new Quaternionf(prevRot).slerp(rot, partialTick);
+        Quaternionf orientation = scratchQ.set(prevRot).slerp(rot, partialTick);
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry + halfHeight, rz));
 
         // Lower the body so it rests on the ground rather than hovering at its hitbox centre. The

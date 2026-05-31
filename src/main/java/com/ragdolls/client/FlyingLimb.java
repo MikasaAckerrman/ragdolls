@@ -49,6 +49,7 @@ final class FlyingLimb {
 
     private final Quaternionf rot = new Quaternionf();
     private final Quaternionf prevRot = new Quaternionf();
+    private final Quaternionf scratchQ = new Quaternionf(); // reused: no per-tick/frame allocation
     private final float spinX, spinY, spinZ;
     private float spinSpeed;
 
@@ -115,7 +116,7 @@ final class FlyingLimb {
         cz += moved.z;
 
         if (spinSpeed != 0.0f) {
-            rot.premul(new Quaternionf().fromAxisAngleRad(spinX, spinY, spinZ, spinSpeed));
+            rot.premul(scratchQ.rotationAxis(spinSpeed, spinX, spinY, spinZ));
             spinSpeed *= SPIN_DRAG;
         }
 
@@ -179,7 +180,7 @@ final class FlyingLimb {
             }
         }
 
-        Quaternionf orientation = new Quaternionf(prevRot).slerp(rot, partialTick);
+        Quaternionf orientation = scratchQ.set(prevRot).slerp(rot, partialTick);
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry, rz));
         MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
 
