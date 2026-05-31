@@ -165,6 +165,11 @@ public final class RagdollManager {
         return true;
     }
 
+    /** True while the player is currently holding a corpse (use input should stay swallowed). */
+    public static boolean isGrabbing() {
+        return grabbed != null;
+    }
+
     /**
      * RMB on a corpse grabs it (so it can be carried and thrown). Returns true if one was grabbed
      * (so the vanilla use action is eaten). Uses the same "nothing closer under the crosshair" rule

@@ -42,7 +42,9 @@ public final class RagdollClient {
     /** Right-clicking a corpse grabs it; whip it around and release to throw it. */
     @SubscribeEvent
     public static void onUseInput(final InputEvent.InteractionKeyMappingTriggered event) {
-        if (event.isUseItem() && RagdollManager.tryGrab()) {
+        // Swallow the use action both when first grabbing and for as long as a corpse is held, so
+        // holding RMB to whip it never also eats/places/uses an item.
+        if (event.isUseItem() && (RagdollManager.isGrabbing() || RagdollManager.tryGrab())) {
             event.setCanceled(true);
         }
     }

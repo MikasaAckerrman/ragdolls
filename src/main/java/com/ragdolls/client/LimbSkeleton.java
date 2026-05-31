@@ -52,6 +52,7 @@ public final class LimbSkeleton {
     private boolean applied = false;
     private boolean droppedRightItem = false; // held item fell to the ground (do not draw in hand)
     private boolean droppedLeftItem = false;
+    private final Vector3f tmpDown = new Vector3f(); // reused each tick (no per-tick allocation)
 
     private LimbSkeleton(ModelPart[] bones, Limb[] role) {
         this.bones = bones;
@@ -209,16 +210,18 @@ public final class LimbSkeleton {
         // World-down in the model's local frame: limbs hang toward the real ground for the body's
         // current orientation. Upright -> arms straight down (= rest pose); lying on the side/back
         // -> they swing out to dangle toward the actual ground.
-        Vector3f down = orientation.transformInverse(new Vector3f(0.0f, -1.0f, 0.0f));
-        float lx = down.x;
-        float lz = down.z;
+        tmpDown.set(0.0f, -1.0f, 0.0f);
+        orientation.transformInverse(tmpDown);
+        float lx = tmpDown.x;
+        float lz = tmpDown.z;
         float kick = (bodySpin * 0.5f + bodySpeed * 1.2f) * floppiness;
         float maxMag = 0.0f;
 
         for (int i = 0; i < bones.length; i++) {
             float gain = gainFor(role[i]) * floppiness;
-            float tgtPitch = Mth.clamp(lz * gain, -MAX_ANGLE, MAX_ANGLE);
-            float tgtRoll = Mth.clamp(-lx * gain, -MAX_ANGLE, MAX_ANGLE);
+            float limit = limitFor(role[i]);
+            float tgtPitch = Mth.clamp(lz * gain, -limit, limit);
+            float tgtRoll = Mth.clamp(-lx * gain, -limit, limit);
             float phase = ((i & 1) == 0) ? 1.0f : -1.0f;
 
             // Spring toward the gravity-hang target (not zero), with a low-damped swing so the limbs
@@ -231,9 +234,9 @@ public final class LimbSkeleton {
             vy[i] += ay;
             vz[i] += az;
 
-            ox[i] = Mth.clamp(ox[i] + vx[i], -MAX_ANGLE, MAX_ANGLE);
-            oy[i] = Mth.clamp(oy[i] + vy[i], -MAX_ANGLE, MAX_ANGLE);
-            oz[i] = Mth.clamp(oz[i] + vz[i], -MAX_ANGLE, MAX_ANGLE);
+            ox[i] = Mth.clamp(ox[i] + vx[i], -limit, limit);
+            oy[i] = Mth.clamp(oy[i] + vy[i], -limit, limit);
+            oz[i] = Mth.clamp(oz[i] + vz[i], -limit, limit);
 
             maxMag = Math.max(maxMag, Math.abs(vx[i]) + Math.abs(vy[i]) + Math.abs(vz[i]));
         }
@@ -257,6 +260,21 @@ public final class LimbSkeleton {
             case RIGHT_ARM, LEFT_ARM -> 1.15f;
             case RIGHT_LEG, LEFT_LEG -> 0.80f;
             default -> 0.45f;
+        };
+    }
+
+    /**
+     * Per-role swing limit (radians). Limbs we positively identify (arms/legs/head of a humanoid)
+     * may swing far and really dangle; the torso is locked; everything we cannot identify - which on
+     * a quadruped/bird model includes the body itself - is kept to a small, safe wobble so those
+     * models do not visibly come apart or jitter.
+     */
+    private static float limitFor(Limb r) {
+        return switch (r) {
+            case BODY -> 0.0f;
+            case HEAD -> 0.6f;
+            case RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG -> MAX_ANGLE;
+            default -> 0.25f; // unknown parts (incl. non-humanoid torsos): gentle, no falling apart
         };
     }
 
