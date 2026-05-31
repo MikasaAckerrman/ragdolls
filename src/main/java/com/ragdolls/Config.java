@@ -13,7 +13,6 @@ public final class Config {
 
     public static final ModConfigSpec.DoubleValue LIFETIME_SECONDS;
     public static final ModConfigSpec.DoubleValue FADE_SECONDS;
-    public static final ModConfigSpec.DoubleValue SETTLE_SECONDS;
     public static final ModConfigSpec.DoubleValue KNOCKBACK_MULTIPLIER;
     public static final ModConfigSpec.IntValue MAX_RAGDOLLS;
     public static final ModConfigSpec.DoubleValue MAX_RENDER_DISTANCE;
@@ -33,10 +32,6 @@ public final class Config {
         FADE_SECONDS = b
                 .comment("Duration of the smooth transparent fade-out before a corpse is removed, in seconds.")
                 .defineInRange("fadeSeconds", 1.5, 0.1, 30.0);
-        SETTLE_SECONDS = b
-                .comment("A corpse must lie motionless this long before it freezes (drops its physics",
-                        "but keeps its pose). Until then it still reacts to the world.")
-                .defineInRange("settleSeconds", 5.0, 0.0, 60.0);
         KNOCKBACK_MULTIPLIER = b
                 .comment("Multiplier for how far corpses are thrown by the killing blow (1.0 = realistic).")
                 .defineInRange("knockbackMultiplier", 1.0, 0.0, 5.0);
@@ -93,11 +88,6 @@ public final class Config {
     public static int fadeTicks() {
         double seconds = SPEC.isLoaded() ? FADE_SECONDS.get() : 1.5;
         return Math.max(0, (int) Math.round(seconds * 20.0));
-    }
-
-    public static int settleTicks() {
-        double seconds = SPEC.isLoaded() ? SETTLE_SECONDS.get() : 5.0;
-        return Math.max(1, (int) Math.round(seconds * 20.0));
     }
 
     public static int maxRagdolls() {

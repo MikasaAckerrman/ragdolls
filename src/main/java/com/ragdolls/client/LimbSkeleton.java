@@ -85,6 +85,11 @@ public final class LimbSkeleton {
         }
     }
 
+    /** True once every limb has stopped moving (used to decide when the corpse may freeze). */
+    public boolean isSettled() {
+        return settled;
+    }
+
     /** Advance the spring-damper one tick. {@code bodySpeed}/{@code bodySpin} drive limb sway. */
     public void tick(float bodySpeed, float bodySpin, float floppiness) {
         for (int i = 0; i < bones.length; i++) {

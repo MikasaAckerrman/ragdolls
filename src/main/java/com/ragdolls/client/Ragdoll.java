@@ -19,6 +19,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
@@ -67,7 +68,6 @@ public final class Ragdoll {
     private final double halfHeight;
     private final LimbSkeleton skeleton;
     private final boolean fadeOnly;     // non-articulable model -> graceful dissolve, no tumble
-    private final int settleTicks;
     private RagdollBodyEntity body;     // optional real collision body (mod-physics compatibility)
     private boolean collideErrorLogged = false;
 
@@ -84,7 +84,6 @@ public final class Ragdoll {
     private int age = 0;
     private int maxAgeTicks;
     private int fadeTicks;
-    private int stillTicks = 0;
     private boolean frozen = false;
     private boolean burning = false;
     private boolean consumed = false;
@@ -106,9 +105,10 @@ public final class Ragdoll {
         this.halfHeight = this.bbHeight * 0.5;
         this.skeleton = LimbSkeleton.capture(model); // null if the model has no usable parts
         this.fadeOnly = (this.skeleton == null);
-        this.settleTicks = Config.settleTicks();
 
-        this.maxAgeTicks = Config.lifetimeTicks();
+        // Player corpses persist (forever unless burned); when the player respawns the client world
+        // is rebuilt and the corpse is dropped automatically. Mob corpses use the configured life.
+        this.maxAgeTicks = (entity instanceof Player) ? Integer.MAX_VALUE / 2 : Config.lifetimeTicks();
         this.fadeTicks = Math.min(Config.fadeTicks(), maxAgeTicks);
         this.burning = payload.onFire();
 
@@ -210,11 +210,17 @@ public final class Ragdoll {
         }
 
         if (frozen) {
-            // No physics. If the ground beneath disappears, dissolve gracefully (not fall).
-            if (age % 10 == 0 && !isSupported(level)) {
-                startFade(fadeTicks);
+            // Wake up (regain physics) if pushed by the player, or if the ground beneath disappears
+            // so the corpse falls again. The lifetime/disappear timer keeps running regardless.
+            boolean wake = tryPush(level);
+            if (!wake && age % 5 == 0 && !isSupported(level)) {
+                wake = true;
             }
-            return;
+            if (wake) {
+                unfreeze();
+            } else {
+                return;
+            }
         }
 
         BlockPos comPos = BlockPos.containing(x, y + halfHeight, z);
@@ -284,27 +290,25 @@ public final class Ragdoll {
             }
         }
 
-        // Track how long the body has been at rest on solid ground; freeze after settleTicks.
+        // Freeze the instant the body is motionless on solid ground AND its limbs have stopped: it
+        // then holds its exact pose at zero cost until something wakes it (push / lost support).
         boolean onGround = hitY && wanted.y < 0.0;
         double horizontal = Math.sqrt(vx * vx + vz * vz);
         boolean still = !inFluid && onGround
                 && Math.abs(vy) < 0.06 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.02;
         if (still) {
-            // Stop residual rotation/creep so a "still" body is truly motionless (gravity is kept,
-            // so it still drops if its support later disappears before it freezes).
+            // Stop residual rotation/creep so a still body is truly motionless.
             spinSpeed = 0.0f;
             vx = 0.0;
             vz = 0.0;
-            if (stillTicks == 0) {
+            if (restStartAge < 0) {
                 restStartAge = age;
                 restDropTarget = computeRestDrop(rot);
             }
-            stillTicks++;
-            if (stillTicks >= settleTicks) {
+            if (skeleton == null || !Config.enableLimbs() || skeleton.isSettled()) {
                 freeze();
             }
         } else {
-            stillTicks = 0;
             restStartAge = -1;
             restDropTarget = 0.0;
         }
@@ -319,6 +323,36 @@ public final class Ragdoll {
             restStartAge = age;
             restDropTarget = computeRestDrop(rot);
         }
+    }
+
+    /** Resume physics (the corpse was pushed or lost its support). */
+    private void unfreeze() {
+        frozen = false;
+        restStartAge = -1;
+        restDropTarget = 0.0;
+    }
+
+    /**
+     * If the local player is walking into a frozen corpse, give it a shove so it wakes and slides.
+     * Purely cosmetic and client-side - enough to "kick" a body around.
+     */
+    private boolean tryPush(Level level) {
+        Player player = Minecraft.getInstance().player;
+        if (player == null) {
+            return false;
+        }
+        Vec3 pv = player.getDeltaMovement();
+        if (pv.x * pv.x + pv.z * pv.z < 0.0016) { // player barely moving (~0.04/tick)
+            return false;
+        }
+        AABB corpseBox = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth + 0.3, bbHeight, bbWidth + 0.3);
+        if (!player.getBoundingBox().intersects(corpseBox)) {
+            return false;
+        }
+        vx = pv.x * 0.8;
+        vz = pv.z * 0.8;
+        vy = 0.06;
+        return true;
     }
 
     /** Begin a smooth dissolve; the corpse is removed once it completes. */
