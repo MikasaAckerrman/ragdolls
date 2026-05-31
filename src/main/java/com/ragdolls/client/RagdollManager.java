@@ -12,9 +12,6 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.AABB;
-import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
@@ -129,15 +126,13 @@ public final class RagdollManager {
         Player player = mc.player;
         Vec3 eye = player.getEyePosition(1.0f);
         Vec3 look = player.getViewVector(1.0f);
-        double reach = 4.5;
-        Vec3 end = eye.add(look.scale(reach));
+        double maxDist = 4.5;
 
-        // Do not hit corpses through walls: clip the ray against blocks first.
-        double maxDist = reach;
-        BlockHitResult block = mc.level.clip(new ClipContext(
-                eye, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
-        if (block != null && block.getType() != HitResult.Type.MISS) {
-            maxDist = eye.distanceTo(block.getLocation());
+        // Only hit a corpse if nothing else (block OR live entity) is closer under the crosshair, so
+        // we never steal an attack aimed at a real mob/block in front of the body.
+        HitResult hr = mc.hitResult;
+        if (hr != null && hr.getType() != HitResult.Type.MISS) {
+            maxDist = Math.min(maxDist, eye.distanceTo(hr.getLocation()));
         }
         Vec3 clampedEnd = eye.add(look.scale(maxDist));
 
