@@ -205,6 +205,11 @@ public final class Ragdoll {
             skeleton.tick(speed, Math.abs(spinSpeed), (float) Config.limbFloppiness());
         }
 
+        // While dissolving, white "crumbling" motes drift up off the body.
+        if (isFadingOut() || (fadeTicks > 0 && maxAgeTicks - age <= fadeTicks)) {
+            spawnFadeParticles(level);
+        }
+
         if (isFadingOut()) {
             return; // dissolving in place; removal handled by isFinished()
         }
@@ -367,6 +372,11 @@ public final class Ragdoll {
         return fadeStartAge >= 0;
     }
 
+    /** True if this corpse belongs to the given entity (used to fade the player's corpse on respawn). */
+    public boolean isFor(Entity owner) {
+        return entity == owner;
+    }
+
     /**
      * How far to lower the model so its lowest point touches the ground for the current orientation.
      * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
@@ -446,6 +456,20 @@ public final class Ragdoll {
             double oz = (random.nextDouble() - 0.5) * bbWidth;
             level.addParticle(ParticleTypes.FLAME, x + ox, y + oy, z + oz, 0.0, 0.02, 0.0);
             level.addParticle(ParticleTypes.LARGE_SMOKE, x + ox, y + oy + 0.2, z + oz, 0.0, 0.03, 0.0);
+        }
+    }
+
+    /** White, bright motes drifting upward - the corpse "crumbling" away as it dissolves. */
+    private void spawnFadeParticles(Level level) {
+        var random = level.getRandom();
+        for (int i = 0; i < 2; i++) {
+            double ox = (random.nextDouble() - 0.5) * bbWidth;
+            double oy = random.nextDouble() * bbHeight;
+            double oz = (random.nextDouble() - 0.5) * bbWidth;
+            double upward = 0.04 + random.nextDouble() * 0.06;
+            level.addParticle(ParticleTypes.END_ROD,
+                    x + ox, y + oy, z + oz,
+                    (random.nextDouble() - 0.5) * 0.02, upward, (random.nextDouble() - 0.5) * 0.02);
         }
     }
 

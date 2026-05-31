@@ -41,6 +41,18 @@ public final class RagdollManager {
         ACTIVE.clear();
     }
 
+    /** Start the dissolve animation for the corpse belonging to {@code owner} (e.g. on respawn). */
+    public static void fadeCorpseOf(Entity owner) {
+        if (owner == null) {
+            return;
+        }
+        for (Ragdoll ragdoll : ACTIVE.values()) {
+            if (ragdoll.isFor(owner)) {
+                ragdoll.startFade(Config.fadeTicks());
+            }
+        }
+    }
+
     /** Create a ragdoll for the entity referenced by the payload, if it still exists locally. */
     public static void spawn(DeathPayload payload) {
         Minecraft mc = Minecraft.getInstance();
