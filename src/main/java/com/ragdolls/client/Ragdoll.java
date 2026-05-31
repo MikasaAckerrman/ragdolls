@@ -172,7 +172,7 @@ public final class Ragdoll {
         double horizVel = Mth.clamp(dist * 0.085, 0.0, 0.7);
         this.vx = dir.x * horizVel;
         this.vz = dir.z * horizVel;
-        this.vy = vyPop + (payload.critical() ? 0.03 : 0.0);
+        this.vy = Math.max(0.12, vyPop) + (payload.critical() ? 0.03 : 0.0);
 
         // Spin axis is horizontal and perpendicular to the push -> the body tumbles in the direction
         // it is thrown. A hit high on the body (head) topples it forward, a low hit (legs) backward.
@@ -190,6 +190,11 @@ public final class Ragdoll {
         this.spinSpeed = (float) Mth.clamp(
                 sign * (0.10 + Math.min(damage * 0.008, 0.18) + Math.abs(lever) * 0.08) * spinScale,
                 -0.6, 0.6);
+        // Guarantee the body topples over and lies down instead of freezing bolt-upright like a live
+        // mob (this is what made low-knockback corpses, e.g. a pig, "stand" with a vanilla head pose).
+        if (Math.abs(this.spinSpeed) < 0.22f) {
+            this.spinSpeed = (float) (sign * 0.22);
+        }
     }
 
     public void tick(Level level) {
@@ -468,15 +473,13 @@ public final class Ragdoll {
     /** White, bright motes drifting upward - the corpse "crumbling" away as it dissolves. */
     private void spawnFadeParticles(Level level) {
         var random = level.getRandom();
-        for (int i = 0; i < 2; i++) {
-            double ox = (random.nextDouble() - 0.5) * bbWidth;
-            double oy = random.nextDouble() * bbHeight;
-            double oz = (random.nextDouble() - 0.5) * bbWidth;
-            double upward = 0.04 + random.nextDouble() * 0.06;
-            level.addParticle(ParticleTypes.END_ROD,
-                    x + ox, y + oy, z + oz,
-                    (random.nextDouble() - 0.5) * 0.02, upward, (random.nextDouble() - 0.5) * 0.02);
-        }
+        double ox = (random.nextDouble() - 0.5) * bbWidth;
+        double oy = random.nextDouble() * bbHeight;
+        double oz = (random.nextDouble() - 0.5) * bbWidth;
+        double upward = 0.10 + random.nextDouble() * 0.12; // small, rising well above the body
+        level.addParticle(ParticleTypes.END_ROD,
+                x + ox, y + oy, z + oz,
+                (random.nextDouble() - 0.5) * 0.01, upward, (random.nextDouble() - 0.5) * 0.01);
     }
 
     public void render(Minecraft mc, PoseStack pose, MultiBufferSource buffers, Vec3 cam, float partialTick) {
@@ -546,6 +549,11 @@ public final class Ragdoll {
             // Rotate about the body's centre of mass for a natural tumble.
             pose.translate(0.0, halfHeight, 0.0);
             pose.mulPose(orientation);
+            if (alpha < 0.999f) {
+                // Shrink toward the centre of mass as it fades: a smooth disappearance that works
+                // even for cutout-rendered mobs, where vertex alpha alone would not blend.
+                pose.scale(alpha, alpha, alpha);
+            }
             pose.translate(0.0, -halfHeight, 0.0);
 
             RagdollRenderContext.set(Config.enableLimbs() ? skeleton : null);
