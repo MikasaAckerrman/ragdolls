@@ -34,6 +34,9 @@ public final class LimbSkeleton {
     private final float[] vx, vy, vz;     // angular velocity per bone
     private final float[] pox, poy, poz;  // previous offset (for render interpolation)
     private final float[] sx, sy, sz;     // saved part rotation, to restore after rendering
+    private final boolean[] svis;         // saved part visibility, to restore after rendering
+    private final boolean[] torn;         // limbs that have been torn off (hidden)
+    private int tornCount = 0;
 
     private boolean settled = false;
     private boolean applied = false;
@@ -53,6 +56,8 @@ public final class LimbSkeleton {
         this.sx = new float[n];
         this.sy = new float[n];
         this.sz = new float[n];
+        this.svis = new boolean[n];
+        this.torn = new boolean[n];
     }
 
     /**
@@ -88,6 +93,27 @@ public final class LimbSkeleton {
     /** True once every limb has stopped moving (used to decide when the corpse may freeze). */
     public boolean isSettled() {
         return settled;
+    }
+
+    public int boneCount() {
+        return bones.length;
+    }
+
+    /** Tear off a random still-attached limb (it becomes hidden). Returns false if none are left. */
+    public boolean tearRandom(net.minecraft.util.RandomSource random) {
+        int remaining = bones.length - tornCount;
+        if (remaining <= 0) {
+            return false;
+        }
+        int pick = random.nextInt(remaining);
+        for (int i = 0; i < bones.length; i++) {
+            if (!torn[i] && pick-- == 0) {
+                torn[i] = true;
+                tornCount++;
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Snap the interpolation anchor to the current pose so frozen limbs hold perfectly still. */
@@ -149,6 +175,10 @@ public final class LimbSkeleton {
             sx[i] = part.xRot;
             sy[i] = part.yRot;
             sz[i] = part.zRot;
+            svis[i] = part.visible;
+            if (torn[i]) {
+                part.visible = false; // a torn-off limb is no longer drawn on the body
+            }
         }
         applied = true;
         for (int i = 0; i < bones.length; i++) {
@@ -170,6 +200,7 @@ public final class LimbSkeleton {
             part.xRot = sx[i];
             part.yRot = sy[i];
             part.zRot = sz[i];
+            part.visible = svis[i];
         }
     }
 }

@@ -13,14 +13,17 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -366,6 +369,95 @@ public final class Ragdoll {
         vz = pv.z * 0.8;
         vy = 0.06;
         return true;
+    }
+
+    /** World box around the corpse (for hit raycasting). */
+    public AABB currentBox() {
+        return AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
+    }
+
+    /**
+     * The player struck this corpse. Knocks it around (force scales with the weapon's damage and,
+     * inversely, the mob's toughness), and - with gore enabled - a hard blow tears off a limb, while
+     * a strong hit to the chest gibs the whole body in a burst of blood.
+     */
+    public void onHit(Vec3 hitPoint, Vec3 lookDir, double weaponDamage) {
+        if (isFadingOut()) {
+            return;
+        }
+        Level level = entity.level();
+        RandomSource random = level.getRandom();
+
+        Vec3 dir = new Vec3(lookDir.x, 0.0, lookDir.z);
+        dir = dir.lengthSqr() > 1.0e-4 ? dir.normalize() : new Vec3(0.0, 0.0, 1.0);
+
+        double mobHp = Math.max(1.0, entity.getMaxHealth());
+        double relative = weaponDamage / mobHp; // 1.0 ~ a one-shot-kill-strength blow
+        double localY = Mth.clamp((hitPoint.y - y) / bbHeight, 0.0, 1.0);
+        double dh = Math.hypot(hitPoint.x - x, hitPoint.z - z);
+        boolean chestCentre = dh < bbWidth * 0.4 && localY > 0.35 && localY < 0.78;
+
+        // Wake and shove it (heavier mob => moves less).
+        unfreeze();
+        double push = Mth.clamp(0.14 * weaponDamage / Math.sqrt(mobHp), 0.05, 0.8);
+        vx += dir.x * push;
+        vz += dir.z * push;
+        vy = Math.max(vy, 0.12);
+
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
+        axis = axis.lengthSqr() > 1.0e-4 ? axis.normalize() : new Vec3(1.0, 0.0, 0.0);
+        spinX = (float) axis.x;
+        spinY = (float) axis.y;
+        spinZ = (float) axis.z;
+        spinSpeed = (float) ((localY >= 0.5 ? 1.0 : -1.0) * Mth.clamp(push * 0.8 + 0.1, 0.1, 0.5));
+
+        if (!Config.enableGore()) {
+            return; // gore disabled: knock it around only, no blood / tearing
+        }
+
+        if (chestCentre && relative >= 1.0 && skeleton != null) {
+            gib(level, hitPoint);
+            return;
+        }
+        if (relative >= 0.5 && skeleton != null) {
+            int tears = relative >= 0.9 ? 2 : 1;
+            boolean tore = false;
+            for (int i = 0; i < tears; i++) {
+                tore |= skeleton.tearRandom(random);
+            }
+            spawnBlood(level, tore ? 10 : 5, hitPoint, dir, tore);
+        } else {
+            spawnBlood(level, 5, hitPoint, dir, false);
+        }
+    }
+
+    /** Chest gib: a big one-shot blood fountain, then the body dissolves away. */
+    private void gib(Level level, Vec3 at) {
+        spawnBlood(level, 40, at, null, true);
+        startFade(10);
+    }
+
+    /**
+     * Red, gravity-affected "blood" using redstone block-break particles (small, splattering bits
+     * that arc and fall). One-shot bursts only - never per tick - so it stays cheap.
+     */
+    private void spawnBlood(Level level, int count, Vec3 at, Vec3 dir, boolean fountain) {
+        RandomSource random = level.getRandom();
+        BlockParticleOption blood = new BlockParticleOption(ParticleTypes.BLOCK, Blocks.REDSTONE_BLOCK.defaultBlockState());
+        for (int i = 0; i < count; i++) {
+            double mvx, mvy, mvz;
+            if (fountain) {
+                mvx = (random.nextDouble() - 0.5) * 0.25;
+                mvz = (random.nextDouble() - 0.5) * 0.25;
+                mvy = 0.20 + random.nextDouble() * 0.35;
+            } else {
+                Vec3 d = dir != null ? dir : new Vec3(random.nextDouble() - 0.5, 0.0, random.nextDouble() - 0.5);
+                mvx = d.x * 0.15 + (random.nextDouble() - 0.5) * 0.10;
+                mvy = 0.05 + random.nextDouble() * 0.15;
+                mvz = d.z * 0.15 + (random.nextDouble() - 0.5) * 0.10;
+            }
+            level.addParticle(blood, at.x, at.y, at.z, mvx, mvy, mvz);
+        }
     }
 
     /** Begin a smooth dissolve; the corpse is removed once it completes. */

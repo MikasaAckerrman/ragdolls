@@ -10,12 +10,19 @@ import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Owns every active client-side ragdoll, drives their physics each client tick and renders them
@@ -108,6 +115,54 @@ public final class RagdollManager {
 
         Ragdolls.LOGGER.debug("Spawned ragdoll id={} type={} (active={})",
                 entity.getId(), entity.getType(), ACTIVE.size());
+    }
+
+    /**
+     * The player swung at something: if a corpse is the nearest thing under the crosshair (and not
+     * behind a block), strike it. Returns true if a corpse was hit (so the vanilla swing is eaten).
+     */
+    public static boolean handleAttack() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || mc.player == null || ACTIVE.isEmpty()) {
+            return false;
+        }
+        Player player = mc.player;
+        Vec3 eye = player.getEyePosition(1.0f);
+        Vec3 look = player.getViewVector(1.0f);
+        double reach = 4.5;
+        Vec3 end = eye.add(look.scale(reach));
+
+        // Do not hit corpses through walls: clip the ray against blocks first.
+        double maxDist = reach;
+        BlockHitResult block = mc.level.clip(new ClipContext(
+                eye, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+        if (block != null && block.getType() != HitResult.Type.MISS) {
+            maxDist = eye.distanceTo(block.getLocation());
+        }
+        Vec3 clampedEnd = eye.add(look.scale(maxDist));
+
+        Ragdoll best = null;
+        Vec3 bestHit = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Ragdoll ragdoll : ACTIVE.values()) {
+            if (ragdoll.isFadingOut()) {
+                continue;
+            }
+            Optional<Vec3> hit = ragdoll.currentBox().inflate(0.1).clip(eye, clampedEnd);
+            if (hit.isPresent()) {
+                double d = eye.distanceToSqr(hit.get());
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = ragdoll;
+                    bestHit = hit.get();
+                }
+            }
+        }
+        if (best == null) {
+            return false;
+        }
+        best.onHit(bestHit, look, player.getAttributeValue(Attributes.ATTACK_DAMAGE));
+        return true;
     }
 
     public static void tick() {

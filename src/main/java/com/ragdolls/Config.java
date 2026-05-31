@@ -18,6 +18,7 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue MAX_RENDER_DISTANCE;
     public static final ModConfigSpec.BooleanValue BURN_IN_LAVA;
     public static final ModConfigSpec.BooleanValue FLOAT_IN_WATER;
+    public static final ModConfigSpec.BooleanValue ENABLE_GORE;
     public static final ModConfigSpec.BooleanValue ENABLE_LIMBS;
     public static final ModConfigSpec.DoubleValue LIMB_FLOPPINESS;
     public static final ModConfigSpec.BooleanValue USE_ENTITY_COLLISION;
@@ -41,7 +42,7 @@ public final class Config {
         MAX_RAGDOLLS = b
                 .comment("Maximum number of corpses at once. When exceeded, the oldest fades out and",
                         "is removed. Lower this if you see frame drops during mass deaths (mob farms).")
-                .defineInRange("maxActiveRagdolls", 15, 1, 1024);
+                .defineInRange("maxActiveRagdolls", 12, 1, 1024);
         MAX_RENDER_DISTANCE = b
                 .comment("Do not render corpses farther than this many blocks (0 = no limit).")
                 .defineInRange("maxRenderDistance", 64.0, 0.0, 512.0);
@@ -54,6 +55,10 @@ public final class Config {
         FLOAT_IN_WATER = b
                 .comment("Corpses float and drift with the current in water.")
                 .define("floatInWater", true);
+        ENABLE_GORE = b
+                .comment("Let you hit corpses: they get knocked around; a hard blow tears off limbs,",
+                        "and a strong hit to the chest gibs the corpse in a burst of blood.")
+                .define("enableGore", true);
         b.pop();
 
         b.push("limbs");
@@ -104,6 +109,10 @@ public final class Config {
 
     public static boolean floatInWater() {
         return !SPEC.isLoaded() || FLOAT_IN_WATER.get();
+    }
+
+    public static boolean enableGore() {
+        return !SPEC.isLoaded() || ENABLE_GORE.get();
     }
 
     public static double knockbackMultiplier() {

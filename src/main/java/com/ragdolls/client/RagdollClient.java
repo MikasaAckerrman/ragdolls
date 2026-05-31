@@ -7,6 +7,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
+import net.neoforged.neoforge.client.event.InputEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
@@ -27,6 +28,14 @@ public final class RagdollClient {
     @SubscribeEvent
     public static void onClientTick(final ClientTickEvent.Post event) {
         RagdollManager.tick();
+    }
+
+    /** Punching a corpse knocks it around / tears it apart instead of swinging at the air. */
+    @SubscribeEvent
+    public static void onAttackInput(final InputEvent.InteractionKeyMappingTriggered event) {
+        if (event.isAttack() && RagdollManager.handleAttack()) {
+            event.setCanceled(true);
+        }
     }
 
     /** When the local player respawns, dissolve their lingering corpse (survival "until respawn"). */
