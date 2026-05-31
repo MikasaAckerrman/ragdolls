@@ -60,8 +60,10 @@ public final class Ragdoll {
     private static final double AIR_DRAG_V = 0.98;  // vertical air resistance (terminal ~4 b/t)
     private static final double GROUND_BOUNCE = 0.22;
     private static final double GROUND_FRICTION = 0.88; // keep inertia: corpse slides, never snap-stops
-    private static final double SPIN_DRAG = 0.98;       // gentle airborne spin bleed (keeps tumble)
-    private static final double GROUND_SPIN_FRICTION = 0.80; // ground contact bleeds the tumble to rest
+    private static final double ANG_DRAG_AIR = 0.99;    // airborne angular damping (keeps the tumble)
+    private static final double ANG_DRAG_GROUND = 0.78; // ground contact bleeds rotation toward rest
+    private static final double TOPPLE_GAIN = 0.020;    // how strongly gravity tips an unbalanced body
+    private static final double MAX_ANG = 0.6;          // clamp angular speed (rad/tick) for stability
     private static final double WALL_BOUNCE = 0.30;
     private static final double PLAYER_VOLUME = 0.6 * 0.6 * 1.8; // reference "mass" (Steve-sized)
     private static final int HIT_COOLDOWN_TICKS = 8;    // min ticks between punches (no feather-spam)
@@ -97,8 +99,10 @@ public final class Ragdoll {
     private final Quaternionf rot = new Quaternionf();
     private final Quaternionf prevRot = new Quaternionf();
 
-    private float spinX, spinY, spinZ; // normalized world-space spin axis
-    private float spinSpeed;            // radians per tick (signed)
+    // World-space angular velocity (rad/tick). The body rotates about this vector each tick, so
+    // tumbles from several impulses compose naturally and a gravity-topple torque (about the centre
+    // of mass) can tip it over in whatever direction its weight leans - real inertia, not a preset.
+    private double wx, wy, wz;
 
     private int age = 0;
     private int maxAgeTicks;
@@ -198,27 +202,24 @@ public final class Ragdoll {
         this.vz = dir.z * horizVel;
         this.vy = Math.max(0.12, vyPop) + (payload.critical() ? 0.03 : 0.0);
 
-        // Spin axis is horizontal and perpendicular to the push -> the body tumbles in the direction
-        // it is thrown. A hit high on the body (head) topples it forward, a low hit (legs) backward.
+        // Initial tumble: spin axis is horizontal and perpendicular to the push, so the body
+        // cartwheels in the direction it is thrown. A hit high on the body (head) topples it
+        // forward, a low hit (legs) backward. This sets the starting angular velocity; from here on
+        // gravity's topple torque about the centre of mass takes over (real inertia).
         Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
         if (axis.lengthSqr() < 1.0e-4) {
             axis = new Vec3(1.0, 0.0, 0.0);
         }
         axis = axis.normalize();
-        this.spinX = (float) axis.x;
-        this.spinY = (float) axis.y;
-        this.spinZ = (float) axis.z;
 
         double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 (feet) .. +1 (head)
         double sign = lever >= 0.0 ? 1.0 : -1.0;
-        this.spinSpeed = (float) Mth.clamp(
+        double spin = Mth.clamp(
                 sign * (0.10 + Math.min(damage * 0.008, 0.18) + Math.abs(lever) * 0.08) * spinScale,
-                -0.6, 0.6);
-        // Guarantee the body topples over and lies down instead of freezing bolt-upright like a live
-        // mob (this is what made low-knockback corpses, e.g. a pig, "stand" with a vanilla head pose).
-        if (Math.abs(this.spinSpeed) < 0.22f) {
-            this.spinSpeed = (float) (sign * 0.22);
-        }
+                -MAX_ANG, MAX_ANG);
+        this.wx = axis.x * spin;
+        this.wy = axis.y * spin;
+        this.wz = axis.z * spin;
 
         // On death an intact corpse may visibly drop the item(s) it was holding.
         maybeDropHandItemsOnDeath(dir);
@@ -277,7 +278,8 @@ public final class Ragdoll {
         // starts dissolving.
         if (skeleton != null && Config.enableLimbs() && !frozen && !isFadingOut()) {
             float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
-            skeleton.tick(rot, speed, Math.abs(spinSpeed), (float) Config.limbFloppiness());
+            float angSpeed = (float) Math.sqrt(wx * wx + wy * wy + wz * wz);
+            skeleton.tick(rot, speed, angSpeed, (float) Config.limbFloppiness());
         }
 
         // While dissolving, white "crumbling" motes drift up off the body.
@@ -356,8 +358,13 @@ public final class Ragdoll {
         y += moved.y;
         z += moved.z;
 
-        if (spinSpeed != 0.0f) {
-            rot.premul(new Quaternionf().fromAxisAngleRad(spinX, spinY, spinZ, spinSpeed));
+        // Integrate the orientation by the angular-velocity vector (its magnitude is the angle this
+        // tick, its direction the axis). Several tumbles thus compose naturally.
+        double angSpeed = Math.sqrt(wx * wx + wy * wy + wz * wz);
+        if (angSpeed > 1.0e-5) {
+            rot.premul(new Quaternionf().fromAxisAngleRad(
+                    (float) (wx / angSpeed), (float) (wy / angSpeed), (float) (wz / angSpeed),
+                    (float) angSpeed));
         }
 
         if (hitX) {
@@ -371,7 +378,6 @@ public final class Ragdoll {
             vy = -vy * GROUND_BOUNCE;
             vx *= GROUND_FRICTION; // gentle: the body keeps its inertia and slides, never snap-stops
             vz *= GROUND_FRICTION;
-            spinSpeed *= GROUND_SPIN_FRICTION; // ground contact bleeds the tumble so it comes to rest
         } else if (hitY) {
             vy = 0.0; // bumped a ceiling
         }
@@ -385,18 +391,26 @@ public final class Ragdoll {
         }
 
         if (grounded && !inFluid) {
-            // Seat the model onto the ground for whatever orientation it naturally came to rest in -
-            // we do NOT force it flat onto its back (no "matryoshka" righting); it keeps the pose its
-            // own inertia produced and just bleeds the last of the spin off through ground contact.
             if (restStartAge < 0) {
                 restStartAge = age;
             }
-            spinSpeed *= GROUND_SPIN_FRICTION;
-            if (Math.abs(spinSpeed) < 0.01f) {
-                spinSpeed = 0.0f;
+            // Centre-of-mass topple: if the body's "up" axis is not vertical, gravity exerts a
+            // torque that tips it further over in exactly the direction its weight already leans -
+            // so it rolls/keels the way a real body would, then settles once it lies flat. No forced
+            // "matryoshka" righting; the body just follows where its mass wants to go.
+            Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(rot);
+            double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
+            if (up.y() > 0.95f && angMag < 0.02) {
+                // Landed bolt-upright and barely turning: nudge it off-balance (deterministic from
+                // position) so a corpse never just stands there - it always keels over and lies down.
+                double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17) * 0.5;
+                wx += Math.cos(a) * 0.03;
+                wz += Math.sin(a) * 0.03;
             }
+            applyToppleTorque();
+            applyAngularDrag(ANG_DRAG_GROUND);
         } else {
-            spinSpeed *= SPIN_DRAG;
+            applyAngularDrag(ANG_DRAG_AIR);
             // Airborne (flying/falling, not resting and not in fluid): pause the disappearance timer
             // so a corpse mid-air does not fade while it still has somewhere to fall.
             if (!grounded) {
@@ -407,20 +421,71 @@ public final class Ragdoll {
             }
         }
 
-        // Freeze ONLY once every bit of motion has died out: linear velocity, the tumble spin, AND
-        // the floppy limbs. Until then keep simulating so the body finishes its inertia naturally
+        // Freeze ONLY once every bit of motion has died out: linear velocity, the tumble, AND the
+        // floppy limbs. Until then keep simulating so the body finishes its inertia naturally
         // instead of stopping the instant it touches the floor.
+        double angNow = Math.sqrt(wx * wx + wy * wy + wz * wz);
         boolean motionless = grounded && !inFluid
-                && Math.abs(vy) < 0.04 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.01f;
+                && Math.abs(vy) < 0.04 && horizontal < 0.02 && angNow < 0.01;
         if (motionless && (skeleton == null || !Config.enableLimbs() || skeleton.isSettled())) {
             freeze();
+        }
+    }
+
+    /**
+     * Gravity-topple torque: while the body rests on the ground, if its local "up" axis is tilted
+     * away from world-up, gravity acting at the centre of mass produces a torque about the contact
+     * that tips it further in the leaning direction (then it lies flat and the torque vanishes). The
+     * torque axis is up_world x up_body; its size grows with the tilt, so a body balanced on edge
+     * keels over the way its weight already leans - emergent, never a scripted righting.
+     */
+    private void applyToppleTorque() {
+        Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(rot); // body up-axis in world space
+        // Only an upright-ish body topples; once it is on its side/face (up.y <= 0) it has reached a
+        // lying pose, so we stop adding torque and let drag settle it (no spinning past flat).
+        if (up.y() <= 0.05f) {
+            return;
+        }
+        // Horizontal lean direction = where "up" points sideways; tip the body that way (gravity at
+        // the CoM). axis = -(worldUp x bodyUp) so the body rotates AWAY from upright, not back to it.
+        double ax = -up.z();
+        double az = up.x();
+        double tiltSin = Math.sqrt(ax * ax + az * az);
+        if (tiltSin < 1.0e-4) {
+            return; // bolt upright and perfectly balanced: nothing to tip (until a nudge breaks it)
+        }
+        // Torque peaks at mid-tilt (up.y * tiltSin) and vanishes both upright and lying flat; scaled
+        // inversely by mass (heavier tips slower, but its momentum then carries it over).
+        double torque = TOPPLE_GAIN * up.y() * tiltSin / Math.sqrt(mass);
+        wx += (ax / tiltSin) * torque;
+        wz += (az / tiltSin) * torque;
+        clampAngular();
+    }
+
+    /** Damp the angular velocity (ground contact bleeds it faster than air). */
+    private void applyAngularDrag(double factor) {
+        wx *= factor;
+        wy *= factor;
+        wz *= factor;
+        if (wx * wx + wy * wy + wz * wz < 1.0e-6) {
+            wx = wy = wz = 0.0;
+        }
+    }
+
+    private void clampAngular() {
+        double m = Math.sqrt(wx * wx + wy * wy + wz * wz);
+        if (m > MAX_ANG) {
+            double f = MAX_ANG / m;
+            wx *= f;
+            wy *= f;
+            wz *= f;
         }
     }
 
     /** Drop physics but keep the current pose. */
     private void freeze() {
         frozen = true;
-        spinSpeed = 0.0f;
+        wx = wy = wz = 0.0;
         vx = vy = vz = 0.0;
         if (skeleton != null) {
             skeleton.freezePose(); // hold the exact limb pose (no sub-degree jitter while frozen)
@@ -490,10 +555,10 @@ public final class Ragdoll {
 
         Vec3 dir = new Vec3(vx, 0.0, vz);
         Vec3 axis = dir.lengthSqr() > 1.0e-4 ? new Vec3(0.0, 1.0, 0.0).cross(dir).normalize() : new Vec3(1.0, 0.0, 0.0);
-        spinX = (float) axis.x;
-        spinY = (float) axis.y;
-        spinZ = (float) axis.z;
-        spinSpeed = (float) Mth.clamp(h * 0.9, 0.0, 0.6);
+        double spin = Mth.clamp(h * 0.9, 0.0, MAX_ANG);
+        wx = axis.x * spin;
+        wy = axis.y * spin;
+        wz = axis.z * spin;
     }
 
     /**
@@ -561,10 +626,11 @@ public final class Ragdoll {
 
         Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
         axis = axis.lengthSqr() > 1.0e-4 ? axis.normalize() : new Vec3(1.0, 0.0, 0.0);
-        spinX = (float) axis.x;
-        spinY = (float) axis.y;
-        spinZ = (float) axis.z;
-        spinSpeed = (float) ((localY >= 0.5 ? 1.0 : -1.0) * Mth.clamp(push * 0.3 + 0.05, 0.05, 0.3));
+        double spin = (localY >= 0.5 ? 1.0 : -1.0) * Mth.clamp(push * 0.3 + 0.05, 0.05, 0.3);
+        wx += axis.x * spin; // add to the current tumble so repeated hits compose
+        wy += axis.y * spin;
+        wz += axis.z * spin;
+        clampAngular();
 
         if (!Config.enableGore()) {
             return; // gore disabled: knock it around only, no blood / tearing
