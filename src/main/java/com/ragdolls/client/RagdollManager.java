@@ -88,7 +88,8 @@ public final class RagdollManager {
             if (liveCount < max) {
                 break;
             }
-            if (!r.isFadingOut()) {
+            // Keep player corpses (they persist until respawn); only evict the oldest mob corpses.
+            if (!r.isFadingOut() && !r.isPlayerCorpse()) {
                 r.startFade(EVICT_FADE_TICKS);
                 liveCount--;
                 Ragdolls.LOGGER.debug("Evicting oldest ragdoll (fade-out) to honour cap ({})", max);

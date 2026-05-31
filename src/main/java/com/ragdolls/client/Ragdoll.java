@@ -36,11 +36,12 @@ import java.util.List;
  * <ol>
  *   <li><b>Physics</b> - thrown by the killing blow, tumbles, collides with the world (floors,
  *       walls, ledges), burns in lava, floats in water.</li>
- *   <li><b>Freeze</b> - once it has lain motionless on solid ground for {@code settleSeconds} it
- *       drops its physics (to cost nothing) but keeps the exact pose it ended up in.</li>
- *   <li><b>Fade</b> - it dissolves smoothly (vertex alpha) and is then removed from memory. This is
- *       triggered by its lifetime expiring, the support beneath a frozen corpse disappearing, or
- *       being evicted when the corpse cap is exceeded.</li>
+ *   <li><b>Freeze</b> - the instant it is motionless on the ground and its limbs have stopped, it
+ *       drops its physics (zero cost) but keeps its exact pose; it wakes again if pushed or if the
+ *       block beneath it is removed.</li>
+ *   <li><b>Fade</b> - it dissolves (vertex alpha + white motes) and is removed. Triggered by its
+ *       lifetime expiring, eviction over the cap, or - for players - respawn. Player corpses persist
+ *       until burned or the player respawns.</li>
  * </ol>
  *
  * <p>Entities whose model exposes no vanilla parts (e.g. GeckoLib mobs) cannot be articulated, so
@@ -375,6 +376,11 @@ public final class Ragdoll {
     /** True if this corpse belongs to the given entity (used to fade the player's corpse on respawn). */
     public boolean isFor(Entity owner) {
         return entity == owner;
+    }
+
+    /** Player corpses persist until respawn, so they are exempt from cap eviction. */
+    public boolean isPlayerCorpse() {
+        return entity instanceof Player;
     }
 
     /**
