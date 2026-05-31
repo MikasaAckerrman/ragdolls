@@ -90,6 +90,13 @@ public final class LimbSkeleton {
         return settled;
     }
 
+    /** Snap the interpolation anchor to the current pose so frozen limbs hold perfectly still. */
+    public void freezePose() {
+        System.arraycopy(ox, 0, pox, 0, ox.length);
+        System.arraycopy(oy, 0, poy, 0, oy.length);
+        System.arraycopy(oz, 0, poz, 0, oz.length);
+    }
+
     /** Advance the spring-damper one tick. {@code bodySpeed}/{@code bodySpin} drive limb sway. */
     public void tick(float bodySpeed, float bodySpin, float floppiness) {
         for (int i = 0; i < bones.length; i++) {

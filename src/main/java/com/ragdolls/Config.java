@@ -68,11 +68,11 @@ public final class Config {
 
         b.push("compat");
         USE_ENTITY_COLLISION = b
-                .comment("EXPERIMENTAL. Collide corpses through a real (invisible, silent) helper",
-                        "entity so physics mods (Create Aeronautics / Sable, Valkyrien Skies) carry",
-                        "them on moving contraptions instead of letting them fall through. Slightly",
-                        "heavier; leave off unless you use such mods.")
-                .define("useEntityCollision", false);
+                .comment("Collide corpses through a real (invisible, silent, inert) helper entity so",
+                        "they rest on / are carried by physics blocks and contraptions (Create",
+                        "Aeronautics / Sable, Valkyrien Skies) instead of falling through. On by",
+                        "default; turn off for a slightly lighter, vanilla-only collision path.")
+                .define("useEntityCollision", true);
         b.pop();
 
         SPEC = b.build();
@@ -119,6 +119,6 @@ public final class Config {
     }
 
     public static boolean useEntityCollision() {
-        return SPEC.isLoaded() && USE_ENTITY_COLLISION.get();
+        return !SPEC.isLoaded() || USE_ENTITY_COLLISION.get();
     }
 }

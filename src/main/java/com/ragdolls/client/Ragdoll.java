@@ -52,7 +52,7 @@ public final class Ragdoll {
     private static final double GRAVITY = 0.045;
     private static final double LINEAR_DRAG = 0.985;
     private static final double GROUND_BOUNCE = 0.22;
-    private static final double GROUND_FRICTION = 0.55;
+    private static final double GROUND_FRICTION = 0.70; // keep more inertia: corpse slides, no abrupt stop
     private static final double WALL_BOUNCE = 0.30;
 
     private static final double WATER_DRAG = 0.82;
@@ -308,10 +308,9 @@ public final class Ragdoll {
         boolean still = !inFluid && onGround
                 && Math.abs(vy) < 0.06 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.02;
         if (still) {
-            // Stop residual rotation/creep so a still body is truly motionless.
-            spinSpeed = 0.0f;
-            vx = 0.0;
-            vz = 0.0;
+            // Do NOT zero velocities here - let drag/friction bring it to rest naturally (keeps the
+            // inertia from the blow). We only record the settle anchor; the freeze itself zeroes the
+            // tiny residuals once the limbs have also stopped.
             if (restStartAge < 0) {
                 restStartAge = age;
                 restDropTarget = computeRestDrop(rot);
@@ -330,6 +329,9 @@ public final class Ragdoll {
         frozen = true;
         spinSpeed = 0.0f;
         vx = vy = vz = 0.0;
+        if (skeleton != null) {
+            skeleton.freezePose(); // hold the exact limb pose (no sub-degree jitter while frozen)
+        }
         if (restStartAge < 0) {
             restStartAge = age;
             restDropTarget = computeRestDrop(rot);
