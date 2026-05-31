@@ -15,7 +15,6 @@ import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleTypes;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
@@ -457,11 +456,6 @@ public final class Ragdoll {
         return mass;
     }
 
-    /** The world centre of the corpse this frame (for a snug, point-blank grab check). */
-    public Vec3 centre() {
-        return new Vec3(x, y + halfHeight, z);
-    }
-
     /** Update the world point the held corpse follows this tick. */
     public void setGrabAnchor(double cx, double cy, double cz) {
         this.grabX = cx;
@@ -739,18 +733,6 @@ public final class Ragdoll {
     }
 
     /**
-     * The body's own texture (for the translucent fade), or null if the renderer will not give one.
-     * Never throws - a foreign renderer that dislikes being queried just falls back to no redirect.
-     */
-    private ResourceLocation safeTexture(EntityRenderer<Entity> renderer) {
-        try {
-            return renderer.getTextureLocation(entity);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    /**
      * How far to lower the model so its lowest point touches the ground for the current orientation.
      * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
      */
@@ -885,11 +867,9 @@ public final class Ragdoll {
             drop = computeRestDrop(orientation) * t;
         }
 
-        // While fading, route rendering through a buffer source that scales vertex alpha AND forces
-        // the body onto a translucent render type for its texture, so it genuinely turns see-through.
-        MultiBufferSource source = alpha < 0.999f
-                ? new FadeBufferSource(buffers, alpha, safeTexture(renderer))
-                : buffers;
+        // While fading, route rendering through a buffer source that turns every layer translucent
+        // (body, armor, items) and scales vertex alpha, so the whole corpse genuinely fades out.
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
 
         // Freeze every state the renderer would use to rotate/animate the model so it draws upright
         // and undeformed; our quaternion then orients the whole body as one rigid piece.

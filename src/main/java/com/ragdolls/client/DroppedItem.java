@@ -147,7 +147,7 @@ final class DroppedItem {
         }
 
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry, rz));
-        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha, null) : buffers;
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
 
         float spin = (age + partialTick) * 4.0f;             // slow spin like a vanilla dropped item
         float bob = resting ? 0.0f : Mth.sin((age + partialTick) * 0.1f) * 0.04f;
@@ -156,9 +156,6 @@ final class DroppedItem {
         try {
             pose.translate(rx - cam.x, (ry - HALF_BOX) - cam.y + bob, rz - cam.z);
             pose.mulPose(Axis.YP.rotationDegrees(spin));
-            if (alpha < 0.999f) {
-                pose.scale(alpha, alpha, alpha);
-            }
             mc.getItemRenderer().renderStatic(stack, ItemDisplayContext.GROUND, light,
                     OverlayTexture.NO_OVERLAY, pose, source, mc.level, 0);
         } catch (Exception e) {
