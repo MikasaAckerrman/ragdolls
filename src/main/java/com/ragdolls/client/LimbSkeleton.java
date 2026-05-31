@@ -5,6 +5,8 @@ import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.model.HierarchicalModel;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.util.Mth;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,9 +24,9 @@ public final class LimbSkeleton {
 
     private static final int MAX_BONES = 24;
 
-    private static final float SPRING = 0.34f;      // pull back toward the natural pose
+    private static final float SPRING = 0.34f;      // pull back toward the rest pose
     private static final float DAMP = 0.55f;        // velocity damping (higher = less jitter)
-    private static final float GRAV_SAG = 0.008f;   // constant downward droop on pitch
+    private static final float GRAV_DRAPE = 0.30f;  // how far limbs sag toward world-down at rest
     private static final float MAX_ANGLE = 0.45f;   // clamp (~26 deg) so limbs stay attached-looking
     private static final float SETTLE_EPS = 0.0006f;
     private static final float WAKE_SPEED = 0.01f;  // body motion above this re-energises limbs
@@ -123,8 +125,12 @@ public final class LimbSkeleton {
         System.arraycopy(oz, 0, poz, 0, oz.length);
     }
 
-    /** Advance the spring-damper one tick. {@code bodySpeed}/{@code bodySpin} drive limb sway. */
-    public void tick(float bodySpeed, float bodySpin, float floppiness) {
+    /**
+     * Advance the spring-damper one tick. The {@code orientation} of the body lets the limbs sag
+     * toward the real world-down (so a corpse lying on its side/back drapes its limbs to match it
+     * instead of snapping back to the upright pose); {@code bodySpeed}/{@code bodySpin} drive sway.
+     */
+    public void tick(Quaternionf orientation, float bodySpeed, float bodySpin, float floppiness) {
         for (int i = 0; i < bones.length; i++) {
             pox[i] = ox[i];
             poy[i] = oy[i];
@@ -136,16 +142,25 @@ public final class LimbSkeleton {
             return; // fully asleep: no work until the body moves again
         }
 
+        // World-down expressed in the model's local frame: when the body is upright this is
+        // (0,-1,0) and adds no droop; as it tumbles onto its side/back the horizontal components
+        // grow, pulling the limbs to hang toward the actual ground for the body's final pose.
+        Vector3f down = orientation.transformInverse(new Vector3f(0.0f, -1.0f, 0.0f));
+        float drape = GRAV_DRAPE * floppiness;
+        float tgtPitch = Mth.clamp(down.z * drape, -MAX_ANGLE, MAX_ANGLE);
+        float tgtRoll = Mth.clamp(-down.x * drape, -MAX_ANGLE, MAX_ANGLE);
+
         float kick = (bodySpin * 0.4f + bodySpeed * 1.0f) * floppiness;
-        float sag = GRAV_SAG * floppiness;
         float maxMag = 0.0f;
 
         for (int i = 0; i < bones.length; i++) {
             float phase = ((i & 1) == 0) ? 1.0f : -1.0f;
 
-            float ax = -SPRING * ox[i] - DAMP * vx[i] + sag + phase * kick * 0.25f;
+            // Spring toward the gravity-draped target (not zero) so the settled pose matches the
+            // resting body instead of snapping back to the default standing pose.
+            float ax = -SPRING * (ox[i] - tgtPitch) - DAMP * vx[i] + phase * kick * 0.25f;
             float ay = -SPRING * oy[i] - DAMP * vy[i] + phase * kick * 0.15f;
-            float az = -SPRING * oz[i] - DAMP * vz[i] + phase * kick * 0.5f;
+            float az = -SPRING * (oz[i] - tgtRoll) - DAMP * vz[i] + phase * kick * 0.5f;
 
             vx[i] += ax;
             vy[i] += ay;
@@ -158,6 +173,9 @@ public final class LimbSkeleton {
             maxMag = Math.max(maxMag, Math.abs(vx[i]) + Math.abs(vy[i]) + Math.abs(vz[i]));
         }
 
+        // "Settled" = limbs have stopped moving (they are now resting at the draped target). While
+        // the body is still toppling, the target keeps shifting, so this stays false until it lies
+        // flat - which is exactly when the corpse is allowed to freeze.
         settled = bodyStill && maxMag < SETTLE_EPS;
     }
 

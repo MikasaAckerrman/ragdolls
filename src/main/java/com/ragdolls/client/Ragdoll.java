@@ -55,7 +55,8 @@ public final class Ragdoll {
     private static final double GRAVITY = 0.045;
     private static final double LINEAR_DRAG = 0.985;
     private static final double GROUND_BOUNCE = 0.22;
-    private static final double GROUND_FRICTION = 0.70; // keep more inertia: corpse slides, no abrupt stop
+    private static final double GROUND_FRICTION = 0.88; // keep inertia: corpse slides, never snap-stops
+    private static final double SPIN_DRAG = 0.98;       // gentle airborne spin bleed (keeps tumble)
     private static final double WALL_BOUNCE = 0.30;
 
     private static final double WATER_DRAG = 0.82;
@@ -98,8 +99,8 @@ public final class Ragdoll {
     private int fadeDurTicks = 1;
 
     // When the corpse settles, its model is dropped so the body lies on the ground instead of
-    // hovering at centre-of-mass height. Ramped in over a few ticks to avoid a visible pop.
-    private double restDropTarget = 0.0;
+    // hovering at centre-of-mass height. The drop tracks the live orientation (so it stays seated
+    // while toppling) and is ramped in over a few ticks from the moment it first touches down.
     private int restStartAge = -1;
 
     public Ragdoll(LivingEntity entity, DeathPayload payload, EntityModel<?> model) {
@@ -211,7 +212,7 @@ public final class Ragdoll {
         // starts dissolving.
         if (skeleton != null && Config.enableLimbs() && !frozen && !isFadingOut()) {
             float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
-            skeleton.tick(speed, Math.abs(spinSpeed), (float) Config.limbFloppiness());
+            skeleton.tick(rot, speed, Math.abs(spinSpeed), (float) Config.limbFloppiness());
         }
 
         // While dissolving, white "crumbling" motes drift up off the body.
@@ -293,38 +294,75 @@ public final class Ragdoll {
         if (hitZ) {
             vz = -vz * WALL_BOUNCE;
         }
-        if (hitY) {
-            if (wanted.y < 0.0) {
-                vy = -vy * GROUND_BOUNCE;
-                vx *= GROUND_FRICTION;
-                vz *= GROUND_FRICTION;
-                spinSpeed *= 0.4f;
-            } else {
-                vy = 0.0; // bumped a ceiling
+        boolean onGround = hitY && wanted.y < 0.0;
+        if (onGround) {
+            vy = -vy * GROUND_BOUNCE;
+            vx *= GROUND_FRICTION; // gentle: the body keeps its inertia and slides, never snap-stops
+            vz *= GROUND_FRICTION;
+        } else if (hitY) {
+            vy = 0.0; // bumped a ceiling
+        }
+
+        double horizontal = Math.sqrt(vx * vx + vz * vz);
+
+        // Is the body actually resting on something? (cheap probe, only while it is moving slowly).
+        boolean grounded = onGround;
+        if (!grounded && !inFluid && Math.abs(vy) < 0.10 && horizontal < 0.12) {
+            grounded = isSupported(level);
+        }
+
+        // While grounded and slow, topple naturally toward a flat lying pose (no freezing bolt
+        // upright, no balancing on an edge). Otherwise the spin just bleeds off slowly so the body
+        // keeps the angular momentum from the blow while it is airborne or sliding.
+        boolean flat;
+        if (grounded && !inFluid && horizontal < 0.10) {
+            if (restStartAge < 0) {
+                restStartAge = age; // start seating the model onto the ground
+            }
+            flat = settleToFlat();
+        } else {
+            spinSpeed *= SPIN_DRAG;
+            flat = false;
+            if (!grounded && (Math.abs(vy) > 0.12 || horizontal > 0.15)) {
+                restStartAge = -1; // genuinely airborne again -> un-seat
             }
         }
 
-        // Freeze the instant the body is motionless on solid ground AND its limbs have stopped: it
-        // then holds its exact pose at zero cost until something wakes it (push / lost support).
-        boolean onGround = hitY && wanted.y < 0.0;
-        double horizontal = Math.sqrt(vx * vx + vz * vz);
-        boolean still = !inFluid && onGround
-                && Math.abs(vy) < 0.06 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.02;
-        if (still) {
-            // Do NOT zero velocities here - let drag/friction bring it to rest naturally (keeps the
-            // inertia from the blow). We only record the settle anchor; the freeze itself zeroes the
-            // tiny residuals once the limbs have also stopped.
-            if (restStartAge < 0) {
-                restStartAge = age;
-                restDropTarget = computeRestDrop(rot);
-            }
-            if (skeleton == null || !Config.enableLimbs() || skeleton.isSettled()) {
-                freeze();
-            }
-        } else {
-            restStartAge = -1;
-            restDropTarget = 0.0;
+        // Freeze only once the body lies flat and still AND its limbs have stopped flopping; until
+        // then keep simulating so nothing stops abruptly or hangs in the air.
+        boolean bodyAtRest = grounded && !inFluid && flat
+                && Math.abs(vy) < 0.08 && horizontal < 0.03;
+        if (bodyAtRest && (skeleton == null || !Config.enableLimbs() || skeleton.isSettled())) {
+            freeze();
         }
+    }
+
+    /**
+     * Gently rotate a grounded body toward a flat lying orientation (its up-axis horizontal), then
+     * bleed off the last of the spin. Returns true once it is flat and no longer turning, so the
+     * corpse may freeze. Replaces an abrupt stop and stops bodies resting balanced on an edge.
+     */
+    private boolean settleToFlat() {
+        Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(rot);
+        float upY = up.y;
+        if (Math.abs(upY) < 0.08f) { // already lying flat
+            spinSpeed *= 0.5f;
+            if (Math.abs(spinSpeed) < 0.01f) {
+                spinSpeed = 0.0f;
+            }
+            return spinSpeed == 0.0f;
+        }
+        // d(upY)/dangle for turning about the (fixed, horizontal) tumble axis.
+        Vector3f axis = new Vector3f(spinX, spinY, spinZ);
+        float dUpY = axis.cross(up, new Vector3f()).y;
+        if (Math.abs(dUpY) < 1.0e-3f) {
+            // Turning about this axis no longer changes the tilt (body already on its side): rest.
+            spinSpeed *= 0.5f;
+            return Math.abs(spinSpeed) < 0.01f;
+        }
+        float sign = (upY * dUpY > 0.0f) ? -1.0f : 1.0f; // drive |upY| down toward zero
+        spinSpeed = sign * Mth.clamp(Math.abs(upY) * 0.20f, 0.02f, 0.16f);
+        return false;
     }
 
     /** Drop physics but keep the current pose. */
@@ -337,7 +375,6 @@ public final class Ragdoll {
         }
         if (restStartAge < 0) {
             restStartAge = age;
-            restDropTarget = computeRestDrop(rot);
         }
     }
 
@@ -345,7 +382,6 @@ public final class Ragdoll {
     private void unfreeze() {
         frozen = false;
         restStartAge = -1;
-        restDropTarget = 0.0;
     }
 
     /**
@@ -605,11 +641,13 @@ public final class Ragdoll {
         Quaternionf orientation = new Quaternionf(prevRot).slerp(rot, partialTick);
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry + halfHeight, rz));
 
-        // Lower a settled body so it rests on the ground rather than hovering at its hitbox centre.
+        // Lower the body so it rests on the ground rather than hovering at its hitbox centre. The
+        // drop is computed from the live orientation so the body stays seated on its edge while it
+        // topples, and is ramped in from the moment it first touched down to avoid a pop.
         double drop = 0.0;
         if (restStartAge >= 0) {
             float t = Mth.clamp((age + partialTick - restStartAge) / (float) RESTDROP_RAMP_TICKS, 0.0f, 1.0f);
-            drop = restDropTarget * t;
+            drop = computeRestDrop(orientation) * t;
         }
 
         // While fading, route rendering through a buffer source that scales vertex alpha so the
