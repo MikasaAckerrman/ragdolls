@@ -125,8 +125,8 @@ public final class RagdollManager {
      */
     public static boolean handleAttack() {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null || mc.player == null || ACTIVE.isEmpty()) {
-            return false;
+        if (mc.level == null || mc.player == null || ACTIVE.isEmpty() || grabbed != null) {
+            return false; // while carrying a corpse, never intercept LMB (no attack-spam on the held body)
         }
         Player player = mc.player;
         Vec3 eye = player.getEyePosition(1.0f);
@@ -145,7 +145,7 @@ public final class RagdollManager {
         Vec3 bestHit = null;
         double bestDist = Double.MAX_VALUE;
         for (Ragdoll ragdoll : ACTIVE.values()) {
-            if (ragdoll.isFadingOut()) {
+            if (ragdoll.isFadingOut() || ragdoll.isGrabbed()) {
                 continue;
             }
             Optional<Vec3> hit = ragdoll.currentBox().inflate(0.1).clip(eye, clampedEnd);
@@ -183,7 +183,8 @@ public final class RagdollManager {
         Player player = mc.player;
         Vec3 eye = player.getEyePosition(1.0f);
         Vec3 look = player.getViewVector(1.0f);
-        double maxDist = 4.5;
+        // Point-blank only: you must be right up against the body (reach ~1 block past the eyes).
+        double maxDist = 1.6;
         HitResult hr = mc.hitResult;
         if (hr != null && hr.getType() != HitResult.Type.MISS) {
             maxDist = Math.min(maxDist, eye.distanceTo(hr.getLocation()));
@@ -194,8 +195,8 @@ public final class RagdollManager {
         Vec3 bestHit = null;
         double bestDist = Double.MAX_VALUE;
         for (Ragdoll ragdoll : ACTIVE.values()) {
-            if (ragdoll.isFadingOut()) {
-                continue;
+            if (ragdoll.isFadingOut() || ragdoll.getMass() > 4.0) {
+                continue; // too heavy/huge to pick up
             }
             Optional<Vec3> hit = ragdoll.currentBox().inflate(0.1).clip(eye, end);
             if (hit.isPresent()) {
@@ -211,7 +212,8 @@ public final class RagdollManager {
             return false;
         }
         grabbed = best;
-        grabDist = Mth.clamp(eye.distanceTo(bestHit), 1.5, 4.0);
+        // Hold it close in front of the player; heavier bodies hang a touch lower/closer.
+        grabDist = Mth.clamp(eye.distanceTo(bestHit), 1.0, 1.8);
         best.setGrabbed(true);
         return true;
     }

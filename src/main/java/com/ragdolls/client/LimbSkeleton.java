@@ -207,21 +207,26 @@ public final class LimbSkeleton {
             return; // fully asleep: no work until the body moves again
         }
 
-        // World-down in the model's local frame: limbs hang toward the real ground for the body's
-        // current orientation. Upright -> arms straight down (= rest pose); lying on the side/back
-        // -> they swing out to dangle toward the actual ground.
+        // World-down expressed in the body's local frame. A limb at rest points along local -Y
+        // (straight down in model space); we solve the pitch (about X) and roll (about Z) that swing
+        // that rest direction onto local world-down, so the limb ALWAYS hangs toward the real ground
+        // no matter how the body is facing - upright, on its side, or fully upside-down. (Computed
+        // once per tick; per-bone we only scale by role and clamp, so this stays cheap.)
         tmpDown.set(0.0f, -1.0f, 0.0f);
         orientation.transformInverse(tmpDown);
-        float lx = tmpDown.x;
+        float lx = Mth.clamp(tmpDown.x, -1.0f, 1.0f);
+        float ly = tmpDown.y;
         float lz = tmpDown.z;
+        float hangRoll = (float) Math.asin(lx);             // sideways sag
+        float hangPitch = (float) Math.atan2(-lz, -ly);     // forward/back sag (handles flip via ly)
         float kick = (bodySpin * 0.5f + bodySpeed * 1.2f) * floppiness;
         float maxMag = 0.0f;
 
         for (int i = 0; i < bones.length; i++) {
-            float gain = gainFor(role[i]) * floppiness;
+            float gain = gainFor(role[i]) * Math.min(1.0f, floppiness);
             float limit = limitFor(role[i]);
-            float tgtPitch = Mth.clamp(lz * gain, -limit, limit);
-            float tgtRoll = Mth.clamp(-lx * gain, -limit, limit);
+            float tgtPitch = Mth.clamp(hangPitch * gain, -limit, limit);
+            float tgtRoll = Mth.clamp(hangRoll * gain, -limit, limit);
             float phase = ((i & 1) == 0) ? 1.0f : -1.0f;
 
             // Spring toward the gravity-hang target (not zero), with a low-damped swing so the limbs

@@ -6,6 +6,7 @@
   "client": [
     "AgeableListModelAccessor",
     "HumanoidArmorLayerMixin",
+    "HumanoidModelMixin",
     "ItemInHandLayerMixin",
     "LivingEntityRendererMixin"
   ],

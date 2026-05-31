@@ -61,7 +61,10 @@ public final class Ragdoll {
     private static final double GROUND_BOUNCE = 0.22;
     private static final double GROUND_FRICTION = 0.88; // keep inertia: corpse slides, never snap-stops
     private static final double SPIN_DRAG = 0.98;       // gentle airborne spin bleed (keeps tumble)
+    private static final double GROUND_SPIN_FRICTION = 0.80; // ground contact bleeds the tumble to rest
     private static final double WALL_BOUNCE = 0.30;
+    private static final double PLAYER_VOLUME = 0.6 * 0.6 * 1.8; // reference "mass" (Steve-sized)
+    private static final int HIT_COOLDOWN_TICKS = 8;    // min ticks between punches (no feather-spam)
 
     private static final double WATER_DRAG = 0.82;
     private static final double WATER_BUOYANCY = 0.045; // torso floats up to the surface
@@ -84,6 +87,8 @@ public final class Ragdoll {
 
     private boolean grabbed = false;     // held by the player (RMB); follows an anchor, then thrown
     private double grabX, grabY, grabZ;  // world anchor the held corpse follows
+    private final double mass;           // ~model volume relative to a player (drives throw/knockback)
+    private int lastHitAge = -100;       // age of the last punch (enforces a hit cooldown)
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -99,7 +104,6 @@ public final class Ragdoll {
     private int maxAgeTicks;
     private int fadeTicks;
     private boolean frozen = false;
-    private boolean burning = false;
     private boolean consumed = false;
     private boolean renderErrorLogged = false;
 
@@ -117,6 +121,9 @@ public final class Ragdoll {
         this.bbWidth = Math.max(0.2, entity.getBbWidth());
         this.bbHeight = Math.max(0.2, entity.getBbHeight());
         this.halfHeight = this.bbHeight * 0.5;
+        // "Mass" ~ how big the model is versus the player, clamped to a sane band. Heavier corpses
+        // are harder to throw far and barely flinch from a punch; lighter ones fling easily.
+        this.mass = Mth.clamp((bbWidth * bbWidth * bbHeight) / PLAYER_VOLUME, 0.25, 8.0);
         this.skeleton = LimbSkeleton.capture(model); // null if the model has no usable parts
         boolean dissolve = isDissolveType(entity); // blobs / flyers / jittery quadrupeds: no ragdoll
         this.fadeOnly = (this.skeleton == null) || dissolve;
@@ -125,7 +132,6 @@ public final class Ragdoll {
         // is rebuilt and the corpse is dropped automatically. Mob corpses use the configured life.
         this.maxAgeTicks = (entity instanceof Player) ? Integer.MAX_VALUE / 2 : Config.lifetimeTicks();
         this.fadeTicks = Math.min(Config.fadeTicks(), maxAgeTicks);
-        this.burning = payload.onFire();
 
         this.x = this.px = entity.getX();
         this.y = this.py = entity.getY();
@@ -245,6 +251,9 @@ public final class Ragdoll {
         // Held by the player: the body follows the grab anchor; the distance it travels each tick
         // becomes its velocity, so whipping it and releasing throws it (Create-handle style).
         if (grabbed) {
+            // Pause the disappearance timer while carried (shift the deadline with age so the
+            // remaining lifetime is frozen until the corpse is put down again).
+            maxAgeTicks++;
             double tx = grabX;
             double ty = grabY - halfHeight;
             double tz = grabZ;
@@ -301,9 +310,6 @@ public final class Ragdoll {
 
         if (inLava && Config.burnInLava()) {
             igniteConsume();
-        }
-        if (burning) {
-            spawnBurnParticles(level);
         }
 
         boolean inFluid = (inWater && Config.floatInWater()) || (inLava && Config.burnInLava());
@@ -364,6 +370,7 @@ public final class Ragdoll {
             vy = -vy * GROUND_BOUNCE;
             vx *= GROUND_FRICTION; // gentle: the body keeps its inertia and slides, never snap-stops
             vz *= GROUND_FRICTION;
+            spinSpeed *= GROUND_SPIN_FRICTION; // ground contact bleeds the tumble so it comes to rest
         } else if (hitY) {
             vy = 0.0; // bumped a ceiling
         }
@@ -376,58 +383,32 @@ public final class Ragdoll {
             grounded = isSupported(level);
         }
 
-        // While grounded and slow, topple naturally toward a flat lying pose (no freezing bolt
-        // upright, no balancing on an edge). Otherwise the spin just bleeds off slowly so the body
-        // keeps the angular momentum from the blow while it is airborne or sliding.
-        boolean flat;
-        if (grounded && !inFluid && horizontal < 0.10) {
+        if (grounded && !inFluid) {
+            // Seat the model onto the ground for whatever orientation it naturally came to rest in -
+            // we do NOT force it flat onto its back (no "matryoshka" righting); it keeps the pose its
+            // own inertia produced and just bleeds the last of the spin off through ground contact.
             if (restStartAge < 0) {
-                restStartAge = age; // start seating the model onto the ground
+                restStartAge = age;
             }
-            flat = settleToFlat();
+            spinSpeed *= GROUND_SPIN_FRICTION;
+            if (Math.abs(spinSpeed) < 0.01f) {
+                spinSpeed = 0.0f;
+            }
         } else {
             spinSpeed *= SPIN_DRAG;
-            flat = false;
             if (!grounded && (Math.abs(vy) > 0.12 || horizontal > 0.15)) {
                 restStartAge = -1; // genuinely airborne again -> un-seat
             }
         }
 
-        // Freeze only once the body lies flat and still AND its limbs have stopped flopping; until
-        // then keep simulating so nothing stops abruptly or hangs in the air.
-        boolean bodyAtRest = grounded && !inFluid && flat
-                && Math.abs(vy) < 0.08 && horizontal < 0.03;
-        if (bodyAtRest && (skeleton == null || !Config.enableLimbs() || skeleton.isSettled())) {
+        // Freeze ONLY once every bit of motion has died out: linear velocity, the tumble spin, AND
+        // the floppy limbs. Until then keep simulating so the body finishes its inertia naturally
+        // instead of stopping the instant it touches the floor.
+        boolean motionless = grounded && !inFluid
+                && Math.abs(vy) < 0.04 && horizontal < 0.02 && Math.abs(spinSpeed) < 0.01f;
+        if (motionless && (skeleton == null || !Config.enableLimbs() || skeleton.isSettled())) {
             freeze();
         }
-    }
-
-    /**
-     * Gently rotate a grounded body toward a flat lying orientation (its up-axis horizontal), then
-     * bleed off the last of the spin. Returns true once it is flat and no longer turning, so the
-     * corpse may freeze. Replaces an abrupt stop and stops bodies resting balanced on an edge.
-     */
-    private boolean settleToFlat() {
-        Vector3f up = new Vector3f(0.0f, 1.0f, 0.0f).rotate(rot);
-        float upY = up.y;
-        if (Math.abs(upY) < 0.08f) { // already lying flat
-            spinSpeed *= 0.5f;
-            if (Math.abs(spinSpeed) < 0.01f) {
-                spinSpeed = 0.0f;
-            }
-            return spinSpeed == 0.0f;
-        }
-        // d(upY)/dangle for turning about the (fixed, horizontal) tumble axis.
-        Vector3f axis = new Vector3f(spinX, spinY, spinZ);
-        float dUpY = axis.cross(up, new Vector3f()).y;
-        if (Math.abs(dUpY) < 1.0e-3f) {
-            // Turning about this axis no longer changes the tilt (body already on its side): rest.
-            spinSpeed *= 0.5f;
-            return Math.abs(spinSpeed) < 0.01f;
-        }
-        float sign = (upY * dUpY > 0.0f) ? -1.0f : 1.0f; // drive |upY| down toward zero
-        spinSpeed = sign * Mth.clamp(Math.abs(upY) * 0.20f, 0.02f, 0.16f);
-        return false;
     }
 
     /** Drop physics but keep the current pose. */
@@ -465,6 +446,16 @@ public final class Ragdoll {
         return grabbed;
     }
 
+    /** Corpse "weight" (relative to a player). Used to scale grab/throw and knockback. */
+    public double getMass() {
+        return mass;
+    }
+
+    /** The world centre of the corpse this frame (for a snug, point-blank grab check). */
+    public Vec3 centre() {
+        return new Vec3(x, y + halfHeight, z);
+    }
+
     /** Update the world point the held corpse follows this tick. */
     public void setGrabAnchor(double cx, double cy, double cz) {
         this.grabX = cx;
@@ -473,29 +464,35 @@ public final class Ragdoll {
     }
 
     /**
-     * Release a held corpse and throw it with whatever velocity it had while being whipped around,
-     * scaled and clamped, plus a tumble in the throw direction (faster whip -> faster, spinnier).
+     * Release a held corpse and throw it. The throw speed is the velocity it was being whipped at,
+     * but the heavier the body the less it carries: a player-weight corpse (zombie) thrown at a full
+     * whip flies on the order of ten blocks, while heavy mobs barely toss. Adds a tumble in the
+     * throw direction.
      */
-    public void release(double scale) {
+    public void release(double throwGain) {
         grabbed = false;
-        vx *= scale;
-        vy *= scale;
-        vz *= scale;
+        vx *= throwGain;
+        vy *= throwGain;
+        vz *= throwGain;
+
+        // Weight cap: max launch speed falls off with mass (so big mobs cannot be flung far).
+        double maxH = Mth.clamp(1.0 / mass, 0.12, 1.0);   // blocks/tick (~zombie: ~0.9 -> ~10 blocks)
+        double maxV = Mth.clamp(0.6 / mass, 0.08, 0.6);
         double h = Math.sqrt(vx * vx + vz * vz);
-        double maxH = 2.0;
         if (h > maxH) {
             double f = maxH / h;
             vx *= f;
             vz *= f;
             h = maxH;
         }
-        vy = Mth.clamp(vy, -1.5, 1.5);
+        vy = Mth.clamp(vy, -maxV, maxV);
+
         Vec3 dir = new Vec3(vx, 0.0, vz);
         Vec3 axis = dir.lengthSqr() > 1.0e-4 ? new Vec3(0.0, 1.0, 0.0).cross(dir).normalize() : new Vec3(1.0, 0.0, 0.0);
         spinX = (float) axis.x;
         spinY = (float) axis.y;
         spinZ = (float) axis.z;
-        spinSpeed = (float) Mth.clamp(h * 0.9, 0.0, 0.8);
+        spinSpeed = (float) Mth.clamp(h * 0.9, 0.0, 0.6);
     }
 
     /**
@@ -532,9 +529,14 @@ public final class Ragdoll {
      * a strong hit to the chest gibs the whole body in a burst of blood.
      */
     public void onHit(Vec3 hitPoint, Vec3 lookDir, double weaponDamage) {
-        if (isFadingOut()) {
+        if (isFadingOut() || grabbed) {
+            return; // never react to a punch while being carried
+        }
+        // Hit cooldown: a corpse cannot be juggled hit-every-tick like a weightless feather.
+        if (age - lastHitAge < HIT_COOLDOWN_TICKS) {
             return;
         }
+        lastHitAge = age;
         Level level = entity.level();
         RandomSource random = level.getRandom();
 
@@ -547,12 +549,13 @@ public final class Ragdoll {
         double dh = Math.hypot(hitPoint.x - x, hitPoint.z - z);
         boolean chestCentre = dh < bbWidth * 0.4 && localY > 0.35 && localY < 0.78;
 
-        // Wake and shove it (heavier mob => moves less).
+        // Wake and shove it. Force scales with weapon damage but is divided by the corpse's weight,
+        // so a heavy body barely moves while a light one is sent flying.
         unfreeze();
-        double push = Mth.clamp(0.14 * weaponDamage / Math.sqrt(mobHp), 0.05, 0.8);
+        double push = Mth.clamp(0.16 * weaponDamage / mass, 0.04, 0.8);
         vx += dir.x * push;
         vz += dir.z * push;
-        vy = Math.max(vy, 0.12);
+        vy = Math.max(vy, 0.10 + 0.06 / mass);
 
         Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
         axis = axis.lengthSqr() > 1.0e-4 ? axis.normalize() : new Vec3(1.0, 0.0, 0.0);
@@ -792,7 +795,6 @@ public final class Ragdoll {
     }
 
     private void igniteConsume() {
-        burning = true;
         if (!consumed) {
             consumed = true;
             maxAgeTicks = Math.min(maxAgeTicks, age + BURN_TICKS);
@@ -800,27 +802,22 @@ public final class Ragdoll {
         }
     }
 
-    private void spawnBurnParticles(Level level) {
+    /**
+     * The corpse "evaporating": a few white motes per tick that rise HIGH and scatter chaotically.
+     * Kept cheap - at most a handful of particles per tick - so mass deaths do not cost FPS.
+     */
+    private void spawnFadeParticles(Level level) {
         var random = level.getRandom();
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) { // a few per tick; chaotic but still very light
             double ox = (random.nextDouble() - 0.5) * bbWidth;
             double oy = random.nextDouble() * bbHeight;
             double oz = (random.nextDouble() - 0.5) * bbWidth;
-            level.addParticle(ParticleTypes.FLAME, x + ox, y + oy, z + oz, 0.0, 0.02, 0.0);
-            level.addParticle(ParticleTypes.LARGE_SMOKE, x + ox, y + oy + 0.2, z + oz, 0.0, 0.03, 0.0);
+            double upward = 0.22 + random.nextDouble() * 0.28; // rise well above the body
+            double swirl = 0.06; // chaotic horizontal scatter
+            level.addParticle(ParticleTypes.END_ROD,
+                    x + ox, y + oy, z + oz,
+                    (random.nextDouble() - 0.5) * swirl, upward, (random.nextDouble() - 0.5) * swirl);
         }
-    }
-
-    /** White, bright motes drifting upward - the corpse "crumbling" away as it dissolves. */
-    private void spawnFadeParticles(Level level) {
-        var random = level.getRandom();
-        double ox = (random.nextDouble() - 0.5) * bbWidth;
-        double oy = random.nextDouble() * bbHeight;
-        double oz = (random.nextDouble() - 0.5) * bbWidth;
-        double upward = 0.10 + random.nextDouble() * 0.12; // small, rising well above the body
-        level.addParticle(ParticleTypes.END_ROD,
-                x + ox, y + oy, z + oz,
-                (random.nextDouble() - 0.5) * 0.01, upward, (random.nextDouble() - 0.5) * 0.01);
     }
 
     public void render(Minecraft mc, PoseStack pose, MultiBufferSource buffers, Vec3 cam, float partialTick) {
