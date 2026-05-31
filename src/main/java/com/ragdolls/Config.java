@@ -24,7 +24,6 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue DROPPED_ITEM_SECONDS;
     public static final ModConfigSpec.BooleanValue ENABLE_LIMBS;
     public static final ModConfigSpec.DoubleValue LIMB_FLOPPINESS;
-    public static final ModConfigSpec.BooleanValue USE_ENTITY_COLLISION;
 
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
@@ -83,15 +82,6 @@ public final class Config {
         LIMB_FLOPPINESS = b
                 .comment("How loose the limbs are. 0 = stiff, 1 = natural, higher = floppier.")
                 .defineInRange("limbFloppiness", 1.0, 0.0, 3.0);
-        b.pop();
-
-        b.push("compat");
-        USE_ENTITY_COLLISION = b
-                .comment("Collide corpses through a real (invisible, silent, inert) helper entity so",
-                        "they rest on / are carried by physics blocks and contraptions (Create",
-                        "Aeronautics / Sable, Valkyrien Skies) instead of falling through. On by",
-                        "default; turn off for a slightly lighter, vanilla-only collision path.")
-                .define("useEntityCollision", true);
         b.pop();
 
         SPEC = b.build();
@@ -156,6 +146,9 @@ public final class Config {
     }
 
     public static boolean useEntityCollision() {
-        return !SPEC.isLoaded() || USE_ENTITY_COLLISION.get();
+        // Always on: corpses collide through the helper entity so physics-mod contraptions
+        // (Create Aeronautics / Sable, Valkyrien Skies) carry them. It is cheap, so there is no
+        // config to turn it off.
+        return true;
     }
 }

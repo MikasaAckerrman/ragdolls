@@ -3,26 +3,47 @@ package com.ragdolls.client;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 
 /**
- * A {@link MultiBufferSource} that multiplies the alpha of every vertex by a factor, used to fade a
- * corpse out smoothly before it is removed. Vertices are still written to the real buffers, so the
- * normal {@code endBatch()} flush handles drawing.
+ * A {@link MultiBufferSource} that fades a corpse out by making its texture genuinely transparent.
+ *
+ * <p>Vanilla entity render types use an <em>alpha-cutout</em> (a hard {@code discard} with no
+ * blending), so simply scaling vertex alpha would make the model pop out, not dissolve. To get a
+ * true fade we route the model through the <b>translucent</b> entity render type (real alpha
+ * blending) for its own texture, then scale every vertex's alpha by the fade factor. Any other
+ * buffer the renderer asks for (e.g. an outline) is passed through with the same alpha scale.</p>
  */
 final class FadeBufferSource implements MultiBufferSource {
 
     private final MultiBufferSource delegate;
     private final float alpha;
+    private final RenderType translucent; // entityTranslucent(texture) - the one we force the body onto
 
-    FadeBufferSource(MultiBufferSource delegate, float alpha) {
+    FadeBufferSource(MultiBufferSource delegate, float alpha, ResourceLocation texture) {
         this.delegate = delegate;
         this.alpha = Mth.clamp(alpha, 0.0f, 1.0f);
+        this.translucent = texture != null ? RenderType.entityTranslucent(texture) : null;
     }
 
     @Override
     public VertexConsumer getBuffer(RenderType type) {
-        return new FadeVertexConsumer(delegate.getBuffer(type), alpha);
+        // Redirect the body's solid (cutout) layers onto a translucent type so alpha actually
+        // blends; leave glint / outline / shadow / already-translucent layers on their own type
+        // (just alpha-scaled) so we do not redraw the body texture in place of an effect.
+        RenderType target = (translucent != null && shouldRedirect(type)) ? translucent : type;
+        return new FadeVertexConsumer(delegate.getBuffer(target), alpha);
+    }
+
+    private boolean shouldRedirect(RenderType type) {
+        if (type == translucent) {
+            return false;
+        }
+        String n = type.toString();
+        // Skip effect layers - only the plain entity cutout body should be made translucent.
+        return !n.contains("glint") && !n.contains("outline") && !n.contains("shadow")
+                && !n.contains("translucent") && !n.contains("eyes") && !n.contains("beam");
     }
 
     /** Forwards every vertex unchanged except for a scaled alpha channel. */

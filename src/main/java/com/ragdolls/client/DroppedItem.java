@@ -147,7 +147,7 @@ final class DroppedItem {
         }
 
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry, rz));
-        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha, null) : buffers;
 
         float spin = (age + partialTick) * 4.0f;             // slow spin like a vanilla dropped item
         float bob = resting ? 0.0f : Mth.sin((age + partialTick) * 0.1f) * 0.04f;

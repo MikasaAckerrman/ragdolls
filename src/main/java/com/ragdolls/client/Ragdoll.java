@@ -15,6 +15,7 @@ import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
@@ -396,8 +397,13 @@ public final class Ragdoll {
             }
         } else {
             spinSpeed *= SPIN_DRAG;
-            if (!grounded && (Math.abs(vy) > 0.12 || horizontal > 0.15)) {
-                restStartAge = -1; // genuinely airborne again -> un-seat
+            // Airborne (flying/falling, not resting and not in fluid): pause the disappearance timer
+            // so a corpse mid-air does not fade while it still has somewhere to fall.
+            if (!grounded) {
+                maxAgeTicks++;
+                if (Math.abs(vy) > 0.12 || horizontal > 0.15) {
+                    restStartAge = -1; // genuinely airborne again -> un-seat
+                }
             }
         }
 
@@ -733,6 +739,18 @@ public final class Ragdoll {
     }
 
     /**
+     * The body's own texture (for the translucent fade), or null if the renderer will not give one.
+     * Never throws - a foreign renderer that dislikes being queried just falls back to no redirect.
+     */
+    private ResourceLocation safeTexture(EntityRenderer<Entity> renderer) {
+        try {
+            return renderer.getTextureLocation(entity);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
      * How far to lower the model so its lowest point touches the ground for the current orientation.
      * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
      */
@@ -867,9 +885,11 @@ public final class Ragdoll {
             drop = computeRestDrop(orientation) * t;
         }
 
-        // While fading, route rendering through a buffer source that scales vertex alpha so the
-        // corpse turns transparent before it is removed.
-        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
+        // While fading, route rendering through a buffer source that scales vertex alpha AND forces
+        // the body onto a translucent render type for its texture, so it genuinely turns see-through.
+        MultiBufferSource source = alpha < 0.999f
+                ? new FadeBufferSource(buffers, alpha, safeTexture(renderer))
+                : buffers;
 
         // Freeze every state the renderer would use to rotate/animate the model so it draws upright
         // and undeformed; our quaternion then orients the whole body as one rigid piece.
@@ -900,16 +920,11 @@ public final class Ragdoll {
             // Rotate about the body's centre of mass for a natural tumble.
             pose.translate(0.0, halfHeight, 0.0);
             pose.mulPose(orientation);
-            if (alpha < 0.999f) {
-                // Shrink toward the centre of mass as it fades: a smooth disappearance that works
-                // even for cutout-rendered mobs, where vertex alpha alone would not blend.
-                pose.scale(alpha, alpha, alpha);
-            }
             pose.translate(0.0, -halfHeight, 0.0);
 
-            // Always hand over the skeleton (when present) so torn-off limbs / dropped items are
-            // hidden on the body. The floppy sway is governed separately by whether the skeleton is
-            // ticked (gated by enableLimbs), so a disabled-limbs corpse simply has zero offsets.
+            // Fade-out is pure transparency: FadeBufferSource scales every vertex's alpha so the
+            // whole model turns see-through, then the corpse is removed from memory (see
+            // isFinished). No shrink/scale animation.
             RagdollRenderContext.set(skeleton);
             renderer.render(entity, 0.0f, partialTick, pose, source, light);
         } catch (Exception e) {
