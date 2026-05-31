@@ -227,7 +227,7 @@ public final class LimbSkeleton {
      * The original rotations are saved so {@link #restore()} can undo them after rendering - the
      * model instance is shared across all entities of this type, so it must be left untouched.
      */
-    public void apply(float partialTick) {
+    public void apply(float partialTick, Limb soloRole) {
         if (applied) {
             return; // re-entrancy guard: a nested entity render must not double-save/offset
         }
@@ -237,8 +237,10 @@ public final class LimbSkeleton {
             sy[i] = part.yRot;
             sz[i] = part.zRot;
             svis[i] = part.visible;
-            if (torn[i]) {
-                part.visible = false; // a torn-off limb is no longer drawn on the body
+            if (soloRole != null) {
+                part.visible = (role[i] == soloRole); // detached chunk: draw only this one limb
+            } else if (torn[i]) {
+                part.visible = false; // body: a torn-off limb is no longer drawn here
             }
         }
         applied = true;

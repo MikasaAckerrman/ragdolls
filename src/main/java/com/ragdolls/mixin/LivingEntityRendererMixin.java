@@ -31,7 +31,7 @@ public abstract class LivingEntityRendererMixin {
         LimbSkeleton skeleton = RagdollRenderContext.current();
         if (skeleton != null) {
             try {
-                skeleton.apply(partialTick);
+                skeleton.apply(partialTick, RagdollRenderContext.solo());
             } catch (Throwable ignored) {
                 // Never let limb posing break entity rendering.
             }

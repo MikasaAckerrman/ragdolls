@@ -30,6 +30,7 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -75,6 +76,7 @@ public final class Ragdoll {
     private final boolean fadeOnly;     // non-articulable model -> graceful dissolve, no tumble
     private RagdollBodyEntity body;     // optional real collision body (mod-physics compatibility)
     private boolean collideErrorLogged = false;
+    private final List<FlyingLimb> flyingLimbs = new ArrayList<>(); // torn-off limbs flying away
 
     private double x, y, z;       // current feet position (world)
     private double px, py, pz;    // previous feet position (for render interpolation)
@@ -207,6 +209,11 @@ public final class Ragdoll {
         this.pz = z;
         this.prevRot.set(rot);
         age++;
+
+        // Torn-off limbs fly on their own and keep going while the corpse freezes/fades.
+        for (int i = 0; i < flyingLimbs.size(); i++) {
+            flyingLimbs.get(i).tick(level);
+        }
 
         // Limbs keep simulating until the body freezes (then they hold their final pose) or it
         // starts dissolving.
@@ -459,7 +466,11 @@ public final class Ragdoll {
             int tears = relative >= 0.9 ? 2 : 1;
             boolean tore = false;
             for (int i = 0; i < tears; i++) {
-                tore |= (skeleton.tearRandom(random) != null);
+                LimbSkeleton.Limb torn = skeleton.tearRandom(random);
+                if (torn != null) {
+                    tore = true;
+                    spawnFlyingLimb(torn, dir, random);
+                }
             }
             spawnBlood(level, tore ? 10 : 5, hitPoint, dir, tore);
         } else {
@@ -471,6 +482,25 @@ public final class Ragdoll {
     private void gib(Level level, Vec3 at) {
         spawnBlood(level, 40, at, null, true);
         startFade(10);
+    }
+
+    /**
+     * Spawn a torn-off limb that flies away as its own chunk (keeping its skin, armor piece and, for
+     * an arm, the held item). Only the known humanoid limbs become chunks; the torso and unknown
+     * bones simply stay hidden on the body.
+     */
+    private void spawnFlyingLimb(LimbSkeleton.Limb role, Vec3 dir, RandomSource random) {
+        switch (role) {
+            case HEAD, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG -> { }
+            default -> { return; }
+        }
+        Vec3 centre = new Vec3(x, y + halfHeight, z);
+        double speed = 0.30 + random.nextDouble() * 0.15;
+        Vec3 velocity = new Vec3(
+                dir.x * speed + (random.nextDouble() - 0.5) * 0.12,
+                0.22 + random.nextDouble() * 0.12,
+                dir.z * speed + (random.nextDouble() - 0.5) * 0.12);
+        flyingLimbs.add(new FlyingLimb(entity, skeleton, role, halfHeight, centre, velocity, random));
     }
 
     /**
@@ -623,6 +653,11 @@ public final class Ragdoll {
         float alpha = fadeAlpha(partialTick);
         if (alpha <= 0.02f) {
             return;
+        }
+
+        // Torn-off limbs are independent chunks in world space - draw them (fading with the corpse).
+        for (int i = 0; i < flyingLimbs.size(); i++) {
+            flyingLimbs.get(i).render(mc, pose, buffers, cam, partialTick, alpha);
         }
 
         double rx = Mth.lerp(partialTick, px, x);

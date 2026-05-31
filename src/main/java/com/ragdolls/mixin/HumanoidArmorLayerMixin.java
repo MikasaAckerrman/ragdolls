@@ -25,6 +25,19 @@ public abstract class HumanoidArmorLayerMixin {
         if (skeleton == null) {
             return;
         }
+        LimbSkeleton.Limb solo = RagdollRenderContext.solo();
+        if (solo != null) {
+            // Rendering a detached limb chunk: show only that limb's armor piece, nothing else.
+            model.head.visible = solo == LimbSkeleton.Limb.HEAD;
+            model.hat.visible = solo == LimbSkeleton.Limb.HEAD;
+            model.body.visible = false;
+            model.rightArm.visible = solo == LimbSkeleton.Limb.RIGHT_ARM;
+            model.leftArm.visible = solo == LimbSkeleton.Limb.LEFT_ARM;
+            model.rightLeg.visible = solo == LimbSkeleton.Limb.RIGHT_LEG;
+            model.leftLeg.visible = solo == LimbSkeleton.Limb.LEFT_LEG;
+            return;
+        }
+        // Body: hide the armor of any limb that has been torn off (it left with the limb chunk).
         if (skeleton.isTorn(LimbSkeleton.Limb.HEAD)) {
             model.head.visible = false;
             model.hat.visible = false;
