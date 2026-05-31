@@ -20,6 +20,7 @@ import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import java.util.List;
 
@@ -50,6 +51,7 @@ public final class Ragdoll {
     private static final double FLUID_MAX_SPEED = 0.25;
 
     private static final int BURN_TICKS = 30; // how fast lava consumes a corpse (~1.5s)
+    private static final int RESTDROP_RAMP_TICKS = 4; // smooth settle so a lying body is not popped down
 
     private final LivingEntity entity;
     private final double bbWidth;
@@ -73,6 +75,11 @@ public final class Ragdoll {
     private boolean burning = false;
     private boolean consumed = false;
     private boolean renderErrorLogged = false;
+
+    // When the corpse settles, its model is dropped so the body actually lies on the ground instead
+    // of hovering at centre-of-mass height. Ramped in over a few ticks to avoid a visible pop.
+    private double restDropTarget = 0.0;
+    private int restStartAge = -1;
 
     public Ragdoll(LivingEntity entity, DeathPayload payload) {
         this.entity = entity;
@@ -154,6 +161,8 @@ public final class Ragdoll {
         if (resting) {
             if (age % 10 == 0 && !isSupported(level)) {
                 resting = false;
+                restStartAge = -1;
+                restDropTarget = 0.0;
             } else {
                 return;
             }
@@ -235,7 +244,21 @@ public final class Ragdoll {
             resting = true;
             spinSpeed = 0.0f;
             vx = vy = vz = 0.0;
+            restDropTarget = computeRestDrop(rot);
+            restStartAge = age;
         }
+    }
+
+    /**
+     * How far to lower the model so its lowest point touches the ground for the current orientation.
+     * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
+     */
+    private double computeRestDrop(Quaternionf q) {
+        double ax = Math.abs(new Vector3f(1.0f, 0.0f, 0.0f).rotate(q).y());
+        double ay = Math.abs(new Vector3f(0.0f, 1.0f, 0.0f).rotate(q).y());
+        double az = Math.abs(new Vector3f(0.0f, 0.0f, 1.0f).rotate(q).y());
+        double verticalHalfExtent = ax * (bbWidth * 0.5) + ay * halfHeight + az * (bbWidth * 0.5);
+        return Math.max(0.0, halfHeight - verticalHalfExtent);
     }
 
     /** True while there is a collidable block directly beneath the corpse's footprint. */
@@ -295,6 +318,13 @@ public final class Ragdoll {
         Quaternionf orientation = new Quaternionf(prevRot).slerp(rot, partialTick);
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry + halfHeight, rz));
 
+        // Lower a settled body so it rests on the ground rather than hovering at its hitbox centre.
+        double drop = 0.0;
+        if (resting && restStartAge >= 0) {
+            float t = Mth.clamp((age + partialTick - restStartAge) / (float) RESTDROP_RAMP_TICKS, 0.0f, 1.0f);
+            drop = restDropTarget * t;
+        }
+
         // While fading, route rendering through a buffer source that scales vertex alpha so the
         // corpse turns transparent before it is removed.
         MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
@@ -322,7 +352,7 @@ public final class Ragdoll {
         dispatcher.setRenderShadow(false);
         pose.pushPose();
         try {
-            pose.translate(rx - cam.x, ry - cam.y, rz - cam.z);
+            pose.translate(rx - cam.x, (ry - drop) - cam.y, rz - cam.z);
             // Rotate about the body's centre of mass for a natural tumble.
             pose.translate(0.0, halfHeight, 0.0);
             pose.mulPose(orientation);

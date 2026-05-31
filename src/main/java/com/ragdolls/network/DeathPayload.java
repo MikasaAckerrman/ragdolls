@@ -11,7 +11,6 @@ import net.minecraft.resources.ResourceLocation;
  *
  * @param entityId  network id of the entity that died
  * @param dirX      x of the (horizontal) push direction, normalized server-side
- * @param dirY      reserved vertical component (currently 0)
  * @param dirZ      z of the push direction
  * @param damage    actual final damage of the killing blow (drives launch distance realistically)
  * @param hitHeight 0..1 normalized height of the impact along the body (0 = feet/legs, 1 = head)
@@ -19,7 +18,7 @@ import net.minecraft.resources.ResourceLocation;
  * @param critical  whether the killing blow was a critical hit
  * @param onFire    whether the entity was burning at death (corpse carries flames)
  */
-public record DeathPayload(int entityId, float dirX, float dirY, float dirZ,
+public record DeathPayload(int entityId, float dirX, float dirZ,
                            float damage, float hitHeight, int cause,
                            boolean critical, boolean onFire)
         implements CustomPacketPayload {
@@ -39,7 +38,6 @@ public record DeathPayload(int entityId, float dirX, float dirY, float dirZ,
     public void write(FriendlyByteBuf buf) {
         buf.writeVarInt(entityId);
         buf.writeFloat(dirX);
-        buf.writeFloat(dirY);
         buf.writeFloat(dirZ);
         buf.writeFloat(damage);
         buf.writeFloat(hitHeight);
@@ -51,14 +49,13 @@ public record DeathPayload(int entityId, float dirX, float dirY, float dirZ,
     public static DeathPayload decode(FriendlyByteBuf buf) {
         int id = buf.readVarInt();
         float dx = buf.readFloat();
-        float dy = buf.readFloat();
         float dz = buf.readFloat();
         float damage = buf.readFloat();
         float hitHeight = buf.readFloat();
         int cause = buf.readVarInt();
         boolean critical = buf.readBoolean();
         boolean onFire = buf.readBoolean();
-        return new DeathPayload(id, dx, dy, dz, damage, hitHeight, cause, critical, onFire);
+        return new DeathPayload(id, dx, dz, damage, hitHeight, cause, critical, onFire);
     }
 
     @Override

@@ -107,7 +107,7 @@ public final class DeathEvents {
 
         DeathPayload payload = new DeathPayload(
                 entity.getId(),
-                (float) dir.x, (float) dir.y, (float) dir.z,
+                (float) dir.x, (float) dir.z,
                 damage, hitHeight, cause, critical, onFire);
 
         PacketDistributor.sendToPlayersTrackingEntityAndSelf(entity, payload);

@@ -23,6 +23,17 @@ repositories {
 neoForge {
     version = project.neoforge_version
 
+    // Local test environment (run from an IDE or `./gradlew runClient` / `runServer`).
+    // Essential for iterating on render/mixin work, which can only be verified in-game.
+    runs {
+        client {
+            client()
+        }
+        server {
+            server()
+        }
+    }
+
     // Register the mod so resources (neoforge.mods.toml) are validated against it.
     mods {
         "${project.mod_id}" {
