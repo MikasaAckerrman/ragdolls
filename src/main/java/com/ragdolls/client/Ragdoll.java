@@ -460,10 +460,12 @@ public final class Ragdoll {
         if (up.y() <= 0.18f) {
             return;
         }
-        // Horizontal lean direction = where "up" points sideways; tip the body that way (gravity at
-        // the CoM). axis = -(worldUp x bodyUp) so the body rotates AWAY from upright, not back to it.
-        double ax = -up.z();
-        double az = up.x();
+        // Tip the body the way its "up" already leans (gravity at the CoM). The angular velocity
+        // must rotate the body-up vector DOWN (toward horizontal), which requires axis = +(worldUp x
+        // bodyUp) = (up.z, 0, -up.x). (The opposite sign rights the body back upright - that was the
+        // bug that made corpses balance on their legs / spin without ever lying down.)
+        double ax = up.z();
+        double az = -up.x();
         double tiltSin = Math.sqrt(ax * ax + az * az);
         if (tiltSin < 1.0e-4) {
             return; // bolt upright and perfectly balanced: nothing to tip (until a nudge breaks it)
