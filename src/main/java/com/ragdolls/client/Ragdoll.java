@@ -1,0 +1,1099 @@
+package com.ragdolls.client;
+
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.ragdolls.Config;
+import com.ragdolls.Ragdolls;
+import com.ragdolls.entity.RagdollBodyEntity;
+import com.ragdolls.network.DeathPayload;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.model.EntityModel;
+import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
+import net.minecraft.client.renderer.entity.EntityRenderer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.BlockParticleOption;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * A single rigid-body corpse with optional floppy limbs.
+ *
+ * <p>Lifecycle:</p>
+ * <ol>
+ *   <li><b>Physics</b> - thrown by the killing blow, tumbles, collides with the world (floors,
+ *       walls, ledges), burns in lava, floats in water.</li>
+ *   <li><b>Freeze</b> - the instant it is motionless on the ground and its limbs have stopped, it
+ *       drops its physics (zero cost) but keeps its exact pose; it wakes again if pushed or if the
+ *       block beneath it is removed.</li>
+ *   <li><b>Fade</b> - it dissolves (vertex alpha + white motes) and is removed. Triggered by its
+ *       lifetime expiring, eviction over the cap, or - for players - respawn. Player corpses persist
+ *       until burned or the player respawns.</li>
+ * </ol>
+ *
+ * <p>Entities whose model exposes no vanilla parts (e.g. GeckoLib mobs) cannot be articulated, so
+ * instead of a rigid ragdoll they simply die with a graceful fade-out in place.</p>
+ */
+public final class Ragdoll {
+
+    private static final double GRAVITY = 0.08;     // vanilla-mob gravity (was floaty at 0.045)
+    private static final double AIR_DRAG_V = 0.98;  // vertical air resistance (terminal ~4 b/t)
+    private static final double GROUND_BOUNCE = 0.22;
+    private static final double GROUND_FRICTION = 0.88; // keep inertia: corpse slides, never snap-stops
+    private static final double ANG_DRAG_AIR = 0.99;    // airborne angular damping (keeps the tumble)
+    private static final double ANG_DRAG_GROUND = 0.78; // ground contact bleeds rotation toward rest
+    private static final double TOPPLE_GAIN = 0.045;    // how strongly gravity tips an unbalanced body
+    private static final double MAX_ANG = 0.6;          // clamp angular speed (rad/tick) for stability
+    private static final double WALL_BOUNCE = 0.30;
+    private static final double PLAYER_VOLUME = 0.6 * 0.6 * 1.8; // reference "mass" (Steve-sized)
+    private static final int HIT_COOLDOWN_TICKS = 8;    // min ticks between punches (no feather-spam)
+
+    private static final double WATER_DRAG = 0.82;
+    private static final double WATER_BUOYANCY = 0.045; // torso floats up to the surface
+    private static final double WATER_CURRENT = 0.9;
+    private static final double FLUID_MAX_SPEED = 0.25;
+
+    private static final int BURN_TICKS = 30;          // how fast lava consumes a corpse (~1.5s)
+    private static final int RESTDROP_RAMP_TICKS = 4;  // smooth settle so a lying body is not popped down
+
+    private final LivingEntity entity;
+    private final double bbWidth;
+    private final double bbHeight;
+    private final double halfHeight;
+    private final LimbSkeleton skeleton;
+    private final boolean fadeOnly;     // non-articulable model -> graceful dissolve, no tumble
+    private RagdollBodyEntity body;     // optional real collision body (mod-physics compatibility)
+    private boolean collideErrorLogged = false;
+    private final List<FlyingLimb> flyingLimbs = new ArrayList<>(); // torn-off limbs flying away
+    private final List<DroppedItem> droppedItems = new ArrayList<>(); // items dropped from the hands
+
+    private boolean grabbed = false;     // held by the player (RMB); follows an anchor, then thrown
+    private double grabX, grabY, grabZ;  // world anchor the held corpse follows
+    private final double mass;           // ~model volume relative to a player (drives throw/knockback)
+    private int lastHitAge = -100;       // age of the last punch (enforces a hit cooldown)
+
+    private double x, y, z;       // current feet position (world)
+    private double px, py, pz;    // previous feet position (for render interpolation)
+    private double vx, vy, vz;    // linear velocity per tick
+
+    private final Quaternionf rot = new Quaternionf();
+    private final Quaternionf prevRot = new Quaternionf();
+
+    // Reusable scratch objects so the per-tick physics and per-frame render allocate nothing (no GC
+    // churn with many corpses). Never escape this instance; both are single-threaded (client only).
+    private final Quaternionf scratchQ = new Quaternionf();
+    private final Vector3f scratchV = new Vector3f();
+
+    // World-space angular velocity (rad/tick). The body rotates about this vector each tick, so
+    // tumbles from several impulses compose naturally and a gravity-topple torque (about the centre
+    // of mass) can tip it over in whatever direction its weight leans - real inertia, not a preset.
+    private double wx, wy, wz;
+
+    private int age = 0;
+    private int maxAgeTicks;
+    private int fadeTicks;
+    private boolean frozen = false;
+    private boolean consumed = false;
+    private boolean renderErrorLogged = false;
+
+    // Forced fade-out (lifetime / support loss / eviction / graceful death).
+    private int fadeStartAge = -1;
+    private int fadeDurTicks = 1;
+
+    // When the corpse settles, its model is dropped so the body lies on the ground instead of
+    // hovering at centre-of-mass height. The drop tracks the live orientation (so it stays seated
+    // while toppling) and is ramped in over a few ticks from the moment it first touches down.
+    private int restStartAge = -1;
+
+    public Ragdoll(LivingEntity entity, DeathPayload payload, EntityModel<?> model) {
+        this.entity = entity;
+        this.bbWidth = Math.max(0.2, entity.getBbWidth());
+        this.bbHeight = Math.max(0.2, entity.getBbHeight());
+        this.halfHeight = this.bbHeight * 0.5;
+        // "Mass" ~ how big the model is versus the player, clamped to a sane band. Heavier corpses
+        // are harder to throw far and barely flinch from a punch; lighter ones fling easily.
+        this.mass = Mth.clamp((bbWidth * bbWidth * bbHeight) / PLAYER_VOLUME, 0.25, 8.0);
+        this.skeleton = LimbSkeleton.capture(model); // null if the model has no usable parts
+        boolean dissolve = isDissolveType(entity); // blobs / flyers / jittery quadrupeds: no ragdoll
+        this.fadeOnly = (this.skeleton == null) || dissolve;
+
+        // Player corpses persist (forever unless burned); when the player respawns the client world
+        // is rebuilt and the corpse is dropped automatically. Mob corpses use the configured life.
+        this.maxAgeTicks = (entity instanceof Player) ? Integer.MAX_VALUE / 2 : Config.lifetimeTicks();
+        this.fadeTicks = Math.min(Config.fadeTicks(), maxAgeTicks);
+
+        this.x = this.px = entity.getX();
+        this.y = this.py = entity.getY();
+        this.z = this.pz = entity.getZ();
+
+        if (fadeOnly) {
+            // Mobs we cannot (or should not) articulate just dissolve where they fell. Blob/flyer/
+            // jittery types also get a clean death poof so it does not look like they vanish raw.
+            if (dissolve) {
+                spawnDeathPoof();
+            }
+            startFade(Math.max(fadeTicks, 16));
+            return;
+        }
+
+        // Optional real collision body so physics mods carry the corpse on their contraptions.
+        if (Config.useEntityCollision() && entity.level() instanceof ClientLevel clientLevel) {
+            try {
+                RagdollBodyEntity b = new RagdollBodyEntity(Ragdolls.RAGDOLL_BODY.get(), clientLevel);
+                b.setBodySize((float) bbWidth, (float) bbHeight);
+                b.setId(RagdollBodyEntity.nextClientId());
+                b.setPos(x, y, z);
+                clientLevel.addEntity(b);
+                this.body = b;
+            } catch (Throwable t) {
+                this.body = null;
+                Ragdolls.LOGGER.warn("Failed to create collision body; using built-in collision", t);
+            }
+        }
+
+        Vec3 dir = new Vec3(payload.dirX(), 0.0, payload.dirZ());
+        if (dir.lengthSqr() < 1.0e-4) {
+            dir = new Vec3(0.0, 0.0, 1.0);
+        }
+        dir = dir.normalize();
+
+        float damage = payload.damage();
+        int cause = payload.cause();
+        double kb = Config.knockbackMultiplier();
+
+        // Realistic horizontal travel distance (blocks): a normal hit shoves the body a couple of
+        // metres, a strong/crit blow noticeably further; capped so nothing flies across the map.
+        double dist = Mth.clamp(1.0 + Math.max(0.0, damage - 3.0) * 0.12, 0.6, 9.0);
+        // Small upward pop only: a killed mob should crumple and fall at vanilla speed, NOT hop up
+        // (a large upward launch read as "slow falling"). Generic melee gets a gentle lift; the
+        // explosion case keeps a real pop.
+        double vyPop = 0.04 + Math.min(damage * 0.003, 0.05);
+        double spinScale = 1.0;
+        switch (cause) {
+            case DeathPayload.CAUSE_EXPLOSION -> {
+                dist *= 1.25;
+                vyPop = 0.24 + Math.min(damage * 0.005, 0.16);
+                spinScale = 1.6;
+            }
+            case DeathPayload.CAUSE_PROJECTILE -> vyPop = 0.05; // flatter push along the shot
+            case DeathPayload.CAUSE_FALL -> {
+                dist *= 0.35;
+                vyPop = 0.02;
+                spinScale = 1.3;
+            }
+            default -> { }
+        }
+        dist *= kb;
+
+        // Farther, weight-aware travel: lighter bodies are flung proportionally further by the same
+        // blow. dist is in blocks; convert to a per-tick launch speed (heavier => less).
+        double horizVel = Mth.clamp(dist * 0.11 / Math.sqrt(mass), 0.0, 0.95);
+        this.vx = dir.x * horizVel;
+        this.vz = dir.z * horizVel;
+
+        // Vertical launch follows WHERE the blow landed, but stays SMALL so gravity dominates and
+        // the body drops at a natural speed (a low/legs hit lifts the feet just a touch more).
+        double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 (feet) .. +1 (head)
+        double lowHitLift = (1.0 - payload.hitHeight()) * 0.06;
+        this.vy = vyPop + lowHitLift + (payload.critical() ? 0.02 : 0.0);
+
+        // Initial tumble: spin axis is horizontal and perpendicular to the push, so the body
+        // cartwheels in the direction it is thrown. A hit high on the body (head) topples it
+        // forward over its feet, a low hit (legs) flips it backward - direction set by the lever.
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
+        if (axis.lengthSqr() < 1.0e-4) {
+            axis = new Vec3(1.0, 0.0, 0.0);
+        }
+        axis = axis.normalize();
+
+        double sign = lever >= 0.0 ? 1.0 : -1.0;
+        double spin = Mth.clamp(
+                sign * (0.12 + Math.min(damage * 0.01, 0.22) + Math.abs(lever) * 0.12) * spinScale,
+                -MAX_ANG, MAX_ANG);
+        this.wx = axis.x * spin;
+        this.wy = axis.y * spin;
+        this.wz = axis.z * spin;
+
+        // On death an intact corpse may visibly drop the item(s) it was holding.
+        maybeDropHandItemsOnDeath(dir);
+    }
+
+    public void tick(Level level) {
+        this.px = x;
+        this.py = y;
+        this.pz = z;
+        this.prevRot.set(rot);
+        age++;
+
+        // Torn-off limbs and dropped items live on their own (they fly/fall and fade out on their
+        // own timers) and keep going while the corpse freezes/fades.
+        for (int i = flyingLimbs.size() - 1; i >= 0; i--) {
+            FlyingLimb limb = flyingLimbs.get(i);
+            limb.tick(level);
+            if (limb.isFinished()) {
+                flyingLimbs.remove(i);
+            }
+        }
+        for (int i = droppedItems.size() - 1; i >= 0; i--) {
+            DroppedItem item = droppedItems.get(i);
+            item.tick(level);
+            if (item.isFinished()) {
+                droppedItems.remove(i);
+            }
+        }
+
+        // Held by the player: the body follows the grab anchor; the distance it travels each tick
+        // becomes its velocity, so whipping it and releasing throws it (Create-handle style).
+        if (grabbed) {
+            // Pause the disappearance timer while carried (shift the deadline with age so the
+            // remaining lifetime is frozen until the corpse is put down again).
+            maxAgeTicks++;
+            double tx = grabX;
+            double ty = grabY - halfHeight;
+            double tz = grabZ;
+            vx = tx - x;
+            vy = ty - y;
+            vz = tz - z;
+            x = tx;
+            y = ty;
+            z = tz;
+            if (body != null) {
+                body.setPos(x, y, z); // keep the collision body in sync so release doesn't snap back
+            }
+            if (skeleton != null && Config.enableLimbs()) {
+                float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
+                skeleton.tick(rot, speed, 0.0f, (float) Config.limbFloppiness());
+            }
+            return;
+        }
+
+        // Limbs keep simulating until the body freezes (then they hold their final pose) or it
+        // starts dissolving.
+        if (skeleton != null && Config.enableLimbs() && !frozen && !isFadingOut()) {
+            float speed = (float) Math.sqrt(vx * vx + vy * vy + vz * vz);
+            float angSpeed = (float) Math.sqrt(wx * wx + wy * wy + wz * wz);
+            skeleton.tick(rot, speed, angSpeed, (float) Config.limbFloppiness());
+        }
+
+        // While dissolving, white "crumbling" motes drift up off the body.
+        if (isFadingOut() || (fadeTicks > 0 && maxAgeTicks - age <= fadeTicks)) {
+            spawnFadeParticles(level);
+        }
+
+        if (isFadingOut()) {
+            return; // dissolving in place; removal handled by isFinished()
+        }
+
+        if (frozen) {
+            // Wake up (regain physics) if pushed by the player, or if the ground beneath disappears
+            // so the corpse falls again. The lifetime/disappear timer keeps running regardless.
+            boolean wake = tryPush(level);
+            if (!wake && age % 5 == 0 && !isSupported(level)) {
+                wake = true;
+            }
+            if (wake) {
+                unfreeze();
+            } else {
+                return;
+            }
+        }
+
+        BlockPos comPos = BlockPos.containing(x, y + halfHeight, z);
+        FluidState fluid = level.getFluidState(comPos);
+        boolean inLava = fluid.is(FluidTags.LAVA);
+        boolean inWater = fluid.is(FluidTags.WATER);
+
+        if (inLava && Config.burnInLava()) {
+            igniteConsume();
+        }
+
+        boolean inFluid = (inWater && Config.floatInWater()) || (inLava && Config.burnInLava());
+
+        // A corpse in water does not rot away while submerged: keep at least 60 s of life so it
+        // floats and drifts instead of vanishing (players already persist).
+        if (inWater && Config.floatInWater() && !(entity instanceof Player)) {
+            int floor = age + 60 * 20;
+            if (maxAgeTicks < floor) {
+                maxAgeTicks = floor;
+            }
+        }
+
+        if (inFluid) {
+            vy += WATER_BUOYANCY;
+            if (inWater && Config.floatInWater()) {
+                Vec3 flow = fluid.getFlow(level, comPos);
+                vx += flow.x * WATER_CURRENT;
+                vz += flow.z * WATER_CURRENT;
+            }
+            vx *= WATER_DRAG;
+            vy *= WATER_DRAG;
+            vz *= WATER_DRAG;
+            vx = Mth.clamp(vx, -FLUID_MAX_SPEED, FLUID_MAX_SPEED);
+            vy = Mth.clamp(vy, -FLUID_MAX_SPEED, FLUID_MAX_SPEED);
+            vz = Mth.clamp(vz, -FLUID_MAX_SPEED, FLUID_MAX_SPEED);
+        } else {
+            // Gravity pulls the body down at real weight; vertical air drag gives a sane terminal
+            // speed. Horizontal motion keeps its inertia (almost no drag) so a thrown body carries.
+            vy = (vy - GRAVITY) * AIR_DRAG_V;
+            vx *= 0.995;
+            vz *= 0.995;
+        }
+
+        // Move + collide against the world (and, with useEntityCollision, mod physics contraptions).
+        Vec3 wanted = new Vec3(vx, vy, vz);
+        Vec3 moved = collideMove(level, wanted);
+
+        boolean hitX = moved.x != wanted.x;
+        boolean hitY = moved.y != wanted.y;
+        boolean hitZ = moved.z != wanted.z;
+
+        x += moved.x;
+        y += moved.y;
+        z += moved.z;
+
+        // Integrate the orientation by the angular-velocity vector (its magnitude is the angle this
+        // tick, its direction the axis). Several tumbles thus compose naturally.
+        double angSpeed = Math.sqrt(wx * wx + wy * wy + wz * wz);
+        if (angSpeed > 1.0e-5) {
+            rot.premul(scratchQ.rotationAxis(
+                    (float) angSpeed,
+                    (float) (wx / angSpeed), (float) (wy / angSpeed), (float) (wz / angSpeed)));
+        }
+
+        if (hitX) {
+            vx = -vx * WALL_BOUNCE;
+        }
+        if (hitZ) {
+            vz = -vz * WALL_BOUNCE;
+        }
+        boolean onGround = hitY && wanted.y < 0.0;
+        if (onGround) {
+            vy = -vy * GROUND_BOUNCE;
+            vx *= GROUND_FRICTION; // gentle: the body keeps its inertia and slides, never snap-stops
+            vz *= GROUND_FRICTION;
+        } else if (hitY) {
+            vy = 0.0; // bumped a ceiling
+        }
+
+        double horizontal = Math.sqrt(vx * vx + vz * vz);
+
+        // Is the body actually resting on something? (cheap probe, only while it is moving slowly).
+        boolean grounded = onGround;
+        if (!grounded && !inFluid && Math.abs(vy) < 0.10 && horizontal < 0.12) {
+            grounded = isSupported(level);
+        }
+
+        // How far the body still is from lying flat (its "up" axis points up = still standing).
+        Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot);
+        boolean flat = up.y() < 0.18f; // |up| nearly horizontal -> the body is really lying down
+
+        if (grounded && !inFluid) {
+            if (restStartAge < 0) {
+                restStartAge = age;
+            }
+            // Gravity at the CoM keeps tipping the body the way it leans until it lies flat (the
+            // torque self-vanishes as up.y -> 0, so it never spins past flat). A body that landed
+            // bolt-upright (topple ~0 there) gets a deterministic shove so it always keels over.
+            applyToppleTorque();
+            double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
+            if (up.y() > 0.85f && angMag < 0.05) {
+                double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17 + Mth.floor(y) * 7) * 0.7;
+                wx += Math.cos(a) * 0.06;
+                wz += Math.sin(a) * 0.06;
+            }
+            // ALWAYS bleed rotation on the ground: this bounds the topple (so a body can never
+            // cartwheel forever / "just spin instead of falling") and lets it settle once flat.
+            applyAngularDrag(ANG_DRAG_GROUND);
+        } else {
+            applyAngularDrag(ANG_DRAG_AIR);
+            // Airborne (flying/falling, not resting and not in fluid): pause the disappearance timer
+            // so a corpse mid-air does not fade while it still has somewhere to fall.
+            if (!grounded) {
+                maxAgeTicks++;
+                if (Math.abs(vy) > 0.12 || horizontal > 0.15) {
+                    restStartAge = -1; // genuinely airborne again -> un-seat
+                }
+            }
+        }
+
+        // Freeze ONLY once it is lying flat AND all motion has died out (linear + tumble + limbs).
+        // Requiring "flat" is what stops a corpse freezing propped-up on its legs or jittering.
+        double angNow = Math.sqrt(wx * wx + wy * wy + wz * wz);
+        boolean motionless = grounded && !inFluid && flat
+                && Math.abs(vy) < 0.04 && horizontal < 0.02 && angNow < 0.012;
+        if (motionless && (skeleton == null || !Config.enableLimbs() || skeleton.isSettled())) {
+            freeze();
+        }
+    }
+
+    /**
+     * Gravity-topple torque: while the body rests on the ground, if its local "up" axis is tilted
+     * away from world-up, gravity acting at the centre of mass produces a torque about the contact
+     * that tips it further in the leaning direction (then it lies flat and the torque vanishes). The
+     * torque axis is up_world x up_body; its size grows with the tilt, so a body balanced on edge
+     * keels over the way its weight already leans - emergent, never a scripted righting.
+     */
+    private void applyToppleTorque() {
+        Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot); // body up-axis in world space
+        // Once the body is essentially lying down (up nearly horizontal) we stop adding torque, so
+        // ground drag can pull the last of the roll to zero and the corpse can freeze. (If this
+        // threshold is too low the torque fights the drag forever and the body never settles.)
+        if (up.y() <= 0.18f) {
+            return;
+        }
+        // Tip the body the way its "up" already leans (gravity at the CoM). The angular velocity
+        // must rotate the body-up vector DOWN (toward horizontal), which requires axis = +(worldUp x
+        // bodyUp) = (up.z, 0, -up.x). (The opposite sign rights the body back upright - that was the
+        // bug that made corpses balance on their legs / spin without ever lying down.)
+        double ax = up.z();
+        double az = -up.x();
+        double tiltSin = Math.sqrt(ax * ax + az * az);
+        if (tiltSin < 1.0e-4) {
+            return; // bolt upright and perfectly balanced: nothing to tip (until a nudge breaks it)
+        }
+        // Torque peaks at mid-tilt (up.y * tiltSin) and vanishes both upright and lying flat; scaled
+        // inversely by mass (heavier tips slower, but its momentum then carries it over).
+        double torque = TOPPLE_GAIN * up.y() * tiltSin / Math.sqrt(mass);
+        wx += (ax / tiltSin) * torque;
+        wz += (az / tiltSin) * torque;
+        clampAngular();
+    }
+
+    /** Damp the angular velocity (ground contact bleeds it faster than air). */
+    private void applyAngularDrag(double factor) {
+        wx *= factor;
+        wy *= factor;
+        wz *= factor;
+        if (wx * wx + wy * wy + wz * wz < 1.0e-6) {
+            wx = wy = wz = 0.0;
+        }
+    }
+
+    private void clampAngular() {
+        double m = Math.sqrt(wx * wx + wy * wy + wz * wz);
+        if (m > MAX_ANG) {
+            double f = MAX_ANG / m;
+            wx *= f;
+            wy *= f;
+            wz *= f;
+        }
+    }
+
+    /** Drop physics but keep the current pose. */
+    private void freeze() {
+        frozen = true;
+        wx = wy = wz = 0.0;
+        vx = vy = vz = 0.0;
+        if (skeleton != null) {
+            skeleton.freezePose(); // hold the exact limb pose (no sub-degree jitter while frozen)
+        }
+        if (restStartAge < 0) {
+            restStartAge = age;
+        }
+    }
+
+    /** Resume physics (the corpse was pushed or lost its support). */
+    private void unfreeze() {
+        frozen = false;
+        restStartAge = -1;
+    }
+
+    /** Begin/stop being carried by the player. On grab the anchor starts at the body's own centre. */
+    public void setGrabbed(boolean g) {
+        this.grabbed = g;
+        if (g) {
+            frozen = false;
+            restStartAge = -1;
+            grabX = x;
+            grabY = y + halfHeight;
+            grabZ = z;
+        }
+    }
+
+    public boolean isGrabbed() {
+        return grabbed;
+    }
+
+    /** Corpse "weight" (relative to a player). Used to scale grab/throw and knockback. */
+    public double getMass() {
+        return mass;
+    }
+
+    /** Update the world point the held corpse follows this tick. */
+    public void setGrabAnchor(double cx, double cy, double cz) {
+        this.grabX = cx;
+        this.grabY = cy;
+        this.grabZ = cz;
+    }
+
+    /**
+     * Release a held corpse and throw it. The throw speed is the velocity it was being whipped at,
+     * but the heavier the body the less it carries: a player-weight corpse (zombie) thrown at a full
+     * whip flies on the order of ten blocks, while heavy mobs barely toss. Adds a tumble in the
+     * throw direction.
+     */
+    public void release(double throwGain) {
+        grabbed = false;
+        vx *= throwGain;
+        vy *= throwGain;
+        vz *= throwGain;
+
+        // Weight cap: max launch speed falls off with mass (so big mobs cannot be flung far).
+        double maxH = Mth.clamp(1.0 / mass, 0.12, 1.0);   // blocks/tick (~zombie: ~0.9 -> ~10 blocks)
+        double maxV = Mth.clamp(0.6 / mass, 0.08, 0.6);
+        double h = Math.sqrt(vx * vx + vz * vz);
+        if (h > maxH) {
+            double f = maxH / h;
+            vx *= f;
+            vz *= f;
+            h = maxH;
+        }
+        vy = Mth.clamp(vy, -maxV, maxV);
+
+        Vec3 dir = new Vec3(vx, 0.0, vz);
+        Vec3 axis = dir.lengthSqr() > 1.0e-4 ? new Vec3(0.0, 1.0, 0.0).cross(dir).normalize() : new Vec3(1.0, 0.0, 0.0);
+        double spin = Mth.clamp(h * 0.9, 0.0, MAX_ANG);
+        wx = axis.x * spin;
+        wy = axis.y * spin;
+        wz = axis.z * spin;
+    }
+
+    /**
+     * If the local player is walking into a frozen corpse, give it a shove so it wakes and slides.
+     * Purely cosmetic and client-side - enough to "kick" a body around.
+     */
+    private boolean tryPush(Level level) {
+        Player player = Minecraft.getInstance().player;
+        if (player == null) {
+            return false;
+        }
+        Vec3 pv = player.getDeltaMovement();
+        if (pv.x * pv.x + pv.z * pv.z < 0.0016) { // player barely moving (~0.04/tick)
+            return false;
+        }
+        AABB corpseBox = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth + 0.3, bbHeight, bbWidth + 0.3);
+        if (!player.getBoundingBox().intersects(corpseBox)) {
+            return false;
+        }
+        vx = pv.x * 0.8;
+        vz = pv.z * 0.8;
+        vy = 0.06;
+        return true;
+    }
+
+    /**
+     * World-space AABB that encloses the corpse in its CURRENT orientation (tight oriented-box
+     * bound). Standing it is ~0.6x1.8x0.6; lying flat it becomes wide and short, so a block mined
+     * underneath a lying body is below the box and the player's swing is NOT stolen by the corpse.
+     * Centre matches the rendered body (lowered by the rest-drop so it sits on the floor).
+     */
+    public AABB currentBox() {
+        float hx = (float) (bbWidth * 0.5);
+        float hy = (float) halfHeight;
+        float hz = (float) (bbWidth * 0.5);
+        Vector3f ex = new Vector3f(hx, 0, 0).rotate(rot);
+        Vector3f ey = new Vector3f(0, hy, 0).rotate(rot);
+        Vector3f ez = new Vector3f(0, 0, hz).rotate(rot);
+        double wHalfX = Math.abs(ex.x()) + Math.abs(ey.x()) + Math.abs(ez.x());
+        double wHalfY = Math.abs(ex.y()) + Math.abs(ey.y()) + Math.abs(ez.y());
+        double wHalfZ = Math.abs(ex.z()) + Math.abs(ey.z()) + Math.abs(ez.z());
+        double drop = restStartAge >= 0 ? computeRestDrop(rot) : 0.0;
+        double cy = y + halfHeight - drop;
+        return new AABB(x - wHalfX, cy - wHalfY, z - wHalfZ, x + wHalfX, cy + wHalfY, z + wHalfZ);
+    }
+
+    /**
+     * The player struck this corpse. Knocks it around (force scales with the weapon's damage and,
+     * inversely, the mob's toughness), and - with gore enabled - a hard blow tears off a limb, while
+     * a strong hit to the chest gibs the whole body in a burst of blood.
+     */
+    public void onHit(Vec3 hitPoint, Vec3 lookDir, double weaponDamage) {
+        if (isFadingOut() || grabbed) {
+            return; // never react to a punch while being carried
+        }
+        // Hit cooldown: a corpse cannot be juggled hit-every-tick like a weightless feather.
+        if (age - lastHitAge < HIT_COOLDOWN_TICKS) {
+            return;
+        }
+        lastHitAge = age;
+        Level level = entity.level();
+        RandomSource random = level.getRandom();
+
+        Vec3 dir = new Vec3(lookDir.x, 0.0, lookDir.z);
+        dir = dir.lengthSqr() > 1.0e-4 ? dir.normalize() : new Vec3(0.0, 0.0, 1.0);
+
+        double mobHp = Math.max(1.0, entity.getMaxHealth());
+        double relative = weaponDamage / mobHp; // 1.0 ~ a one-shot-kill-strength blow
+        double localY = Mth.clamp((hitPoint.y - y) / bbHeight, 0.0, 1.0);
+        double dh = Math.hypot(hitPoint.x - x, hitPoint.z - z);
+        boolean chestCentre = dh < bbWidth * 0.4 && localY > 0.35 && localY < 0.78;
+
+        // Wake and shove it. The knockback is a proper launch (damage-driven) divided by weight, so
+        // a light body flies and a heavy one barely budges; the spin is a modest topple, not the
+        // main effect (a punch should mostly push, only lightly spin).
+        unfreeze();
+        double push = Mth.clamp(0.32 * weaponDamage / mass, 0.08, 1.2);
+        vx += dir.x * push;
+        vz += dir.z * push;
+        vy = Math.max(vy, 0.16 + 0.08 / mass);
+
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
+        axis = axis.lengthSqr() > 1.0e-4 ? axis.normalize() : new Vec3(1.0, 0.0, 0.0);
+        double spin = (localY >= 0.5 ? 1.0 : -1.0) * Mth.clamp(push * 0.3 + 0.05, 0.05, 0.3);
+        wx += axis.x * spin; // add to the current tumble so repeated hits compose
+        wy += axis.y * spin;
+        wz += axis.z * spin;
+        clampAngular();
+
+        if (!Config.enableGore()) {
+            return; // gore disabled: knock it around only, no blood / tearing
+        }
+
+        if (chestCentre && relative >= 1.0 && skeleton != null) {
+            gib(level, hitPoint);
+            return;
+        }
+        if (relative >= 0.5 && skeleton != null) {
+            int tears = relative >= 0.9 ? 2 : 1;
+            boolean tore = false;
+            for (int i = 0; i < tears; i++) {
+                LimbSkeleton.Limb torn = skeleton.tearRandom(random);
+                if (torn != null) {
+                    tore = true;
+                    spawnFlyingLimb(torn, dir, random);
+                }
+            }
+            spawnBlood(level, tore ? 10 : 5, hitPoint, dir, tore);
+        } else {
+            spawnBlood(level, 5, hitPoint, dir, false);
+        }
+    }
+
+    /** Chest gib: a big one-shot blood fountain, then the body dissolves away. */
+    private void gib(Level level, Vec3 at) {
+        spawnBlood(level, 40, at, null, true);
+        startFade(10);
+    }
+
+    /**
+     * Spawn a torn-off limb that flies away as its own chunk (keeping its skin, armor piece and, for
+     * an arm, the held item). Only the known humanoid limbs become chunks; the torso and unknown
+     * bones simply stay hidden on the body.
+     */
+    private void spawnFlyingLimb(LimbSkeleton.Limb role, Vec3 dir, RandomSource random) {
+        switch (role) {
+            case HEAD, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG -> { }
+            default -> { return; }
+        }
+        Vec3 centre = new Vec3(x, y + halfHeight, z);
+        // An arm's held item may instead fall to the ground rather than fly off with the arm.
+        if ((role == LimbSkeleton.Limb.RIGHT_ARM || role == LimbSkeleton.Limb.LEFT_ARM)
+                && !skeleton.isItemDropped(role)) {
+            ItemStack held = itemForArm(role);
+            if (!held.isEmpty() && random.nextDouble() < Config.itemDropChance()) {
+                skeleton.markItemDropped(role);
+                droppedItems.add(new DroppedItem(held.copy(), centre, DroppedItem.toss(dir, random)));
+            }
+        }
+        double speed = 0.30 + random.nextDouble() * 0.15;
+        Vec3 velocity = new Vec3(
+                dir.x * speed + (random.nextDouble() - 0.5) * 0.12,
+                0.22 + random.nextDouble() * 0.12,
+                dir.z * speed + (random.nextDouble() - 0.5) * 0.12);
+        flyingLimbs.add(new FlyingLimb(entity, skeleton, role, halfHeight, centre, velocity, random));
+    }
+
+    /** The item rendered in the given arm (mirrors vanilla {@code ItemInHandLayer} hand mapping). */
+    private ItemStack itemForArm(LimbSkeleton.Limb arm) {
+        boolean rightIsMain = entity.getMainArm() == HumanoidArm.RIGHT;
+        if (arm == LimbSkeleton.Limb.RIGHT_ARM) {
+            return rightIsMain ? entity.getMainHandItem() : entity.getOffhandItem();
+        }
+        if (arm == LimbSkeleton.Limb.LEFT_ARM) {
+            return rightIsMain ? entity.getOffhandItem() : entity.getMainHandItem();
+        }
+        return ItemStack.EMPTY;
+    }
+
+    /** On death, an intact corpse may visibly drop the item(s) from its hands (configurable chance). */
+    private void maybeDropHandItemsOnDeath(Vec3 dir) {
+        if (skeleton == null || !skeleton.hasArms() || Config.itemDropChance() <= 0.0) {
+            return;
+        }
+        RandomSource random = entity.level().getRandom();
+        dropHandItem(LimbSkeleton.Limb.RIGHT_ARM, dir, random);
+        dropHandItem(LimbSkeleton.Limb.LEFT_ARM, dir, random);
+    }
+
+    private void dropHandItem(LimbSkeleton.Limb arm, Vec3 dir, RandomSource random) {
+        if (skeleton.isItemDropped(arm)) {
+            return;
+        }
+        ItemStack stack = itemForArm(arm);
+        if (stack.isEmpty() || random.nextDouble() >= Config.itemDropChance()) {
+            return;
+        }
+        skeleton.markItemDropped(arm);
+        Vec3 centre = new Vec3(x, y + halfHeight, z);
+        droppedItems.add(new DroppedItem(stack.copy(), centre, DroppedItem.toss(dir, random)));
+    }
+
+    /**
+     * Red, gravity-affected "blood" using redstone block-break particles (small, splattering bits
+     * that arc and fall). One-shot bursts only - never per tick - so it stays cheap.
+     */
+    private void spawnBlood(Level level, int count, Vec3 at, Vec3 dir, boolean fountain) {
+        RandomSource random = level.getRandom();
+        BlockParticleOption blood = new BlockParticleOption(ParticleTypes.BLOCK, Blocks.REDSTONE_BLOCK.defaultBlockState());
+        for (int i = 0; i < count; i++) {
+            double mvx, mvy, mvz;
+            if (fountain) {
+                mvx = (random.nextDouble() - 0.5) * 0.25;
+                mvz = (random.nextDouble() - 0.5) * 0.25;
+                mvy = 0.20 + random.nextDouble() * 0.35;
+            } else {
+                Vec3 d = dir != null ? dir : new Vec3(random.nextDouble() - 0.5, 0.0, random.nextDouble() - 0.5);
+                mvx = d.x * 0.15 + (random.nextDouble() - 0.5) * 0.10;
+                mvy = 0.05 + random.nextDouble() * 0.15;
+                mvz = d.z * 0.15 + (random.nextDouble() - 0.5) * 0.10;
+            }
+            level.addParticle(blood, at.x, at.y, at.z, mvx, mvy, mvz);
+        }
+    }
+
+    /** Begin a smooth dissolve; the corpse is removed once it completes. */
+    public void startFade(int durationTicks) {
+        if (fadeStartAge < 0) {
+            fadeStartAge = age;
+            fadeDurTicks = Math.max(1, durationTicks);
+        }
+    }
+
+    public boolean isFadingOut() {
+        return fadeStartAge >= 0;
+    }
+
+    /** True if this corpse belongs to the given entity (used to fade the player's corpse on respawn). */
+    public boolean isFor(Entity owner) {
+        return entity == owner;
+    }
+
+    /** Player corpses persist until respawn, so they are exempt from cap eviction. */
+    public boolean isPlayerCorpse() {
+        return entity instanceof Player;
+    }
+
+    /**
+     * Types that ragdoll badly (gelatinous blobs, flyers, and jittery quadruped death animations
+     * such as horses) are not articulated: they get a graceful dissolve + death poof instead. Keeps
+     * the corpses that actually look good (humanoids, common animals) and drops the broken ones.
+     */
+    private static boolean isDissolveType(LivingEntity e) {
+        EntityType<?> t = e.getType();
+        return t == EntityType.SLIME || t == EntityType.MAGMA_CUBE || t == EntityType.GHAST
+                || t == EntityType.PHANTOM || t == EntityType.SHULKER || t == EntityType.VEX
+                || t == EntityType.BAT || t == EntityType.BEE || t == EntityType.ALLAY
+                || t == EntityType.PARROT || t == EntityType.HORSE || t == EntityType.DONKEY
+                || t == EntityType.MULE || t == EntityType.SKELETON_HORSE
+                || t == EntityType.ZOMBIE_HORSE || t == EntityType.LLAMA
+                || t == EntityType.TRADER_LLAMA || t == EntityType.CAMEL;
+    }
+
+    /** A one-shot puff of vanilla death smoke for dissolve-only mobs. */
+    private void spawnDeathPoof() {
+        Level level = entity.level();
+        RandomSource random = level.getRandom();
+        for (int i = 0; i < 12; i++) {
+            double ox = (random.nextDouble() - 0.5) * bbWidth;
+            double oy = random.nextDouble() * bbHeight;
+            double oz = (random.nextDouble() - 0.5) * bbWidth;
+            level.addParticle(ParticleTypes.POOF, x + ox, y + oy, z + oz,
+                    (random.nextDouble() - 0.5) * 0.05, 0.05 + random.nextDouble() * 0.05,
+                    (random.nextDouble() - 0.5) * 0.05);
+        }
+    }
+
+    /**
+     * The corpse's own texture from its renderer (for the translucent fade). Never throws - a
+     * foreign renderer that dislikes being queried just yields null and the fade alpha-scales on the
+     * original type (graceful).
+     */
+    private ResourceLocation safeTexture(EntityRenderer<Entity> renderer) {
+        try {
+            return renderer.getTextureLocation(entity);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * How far to lower the model so its lowest point touches the ground for the current orientation.
+     * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
+     */
+    private double computeRestDrop(Quaternionf q) {
+        double ax = Math.abs(scratchV.set(1.0f, 0.0f, 0.0f).rotate(q).y());
+        double ay = Math.abs(scratchV.set(0.0f, 1.0f, 0.0f).rotate(q).y());
+        double az = Math.abs(scratchV.set(0.0f, 0.0f, 1.0f).rotate(q).y());
+        double verticalHalfExtent = ax * (bbWidth * 0.5) + ay * halfHeight + az * (bbWidth * 0.5);
+        return Math.max(0.0, halfHeight - verticalHalfExtent);
+    }
+
+    /**
+     * Resolve one tick of movement. With a collision body the corpse follows the body's position
+     * (so mod contraptions can carry it); otherwise it uses Minecraft's swept block collision.
+     */
+    private Vec3 collideMove(Level level, Vec3 wanted) {
+        RagdollBodyEntity b = this.body;
+        if (b != null) {
+            try {
+                b.setDeltaMovement(wanted.x, wanted.y, wanted.z);
+                b.move(MoverType.SELF, b.getDeltaMovement());
+                // Trust the helper body's resolved motion: this is what lets physics-mod contraptions
+                // (Create Aeronautics / Sable, Valkyrien Skies) carry the corpse. We must NOT second
+                // -guess it with a vanilla block sweep - doing so dropped corpses straight through any
+                // non-vanilla (contraption) surface, since vanilla sees no block there.
+                return new Vec3(b.getX() - x, b.getY() - y, b.getZ() - z);
+            } catch (Throwable t) {
+                if (!collideErrorLogged) {
+                    collideErrorLogged = true;
+                    Ragdolls.LOGGER.warn("Entity collision failed; falling back to built-in collision", t);
+                }
+                disposeBody();
+            }
+        }
+        AABB box = AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
+        return Entity.collideBoundingBox(null, wanted, box, level, List.of());
+    }
+
+    /** Remove the collision body from the world; called when the corpse is discarded. */
+    public void dispose() {
+        disposeBody();
+    }
+
+    private void disposeBody() {
+        RagdollBodyEntity b = this.body;
+        if (b != null) {
+            try {
+                if (b.level() instanceof ClientLevel clientLevel) {
+                    clientLevel.removeEntity(b.getId(), Entity.RemovalReason.DISCARDED);
+                }
+            } catch (Throwable ignored) {
+                // best effort
+            }
+            this.body = null;
+        }
+    }
+
+    /** True while there is a collidable block directly beneath the corpse's footprint. */
+    private boolean isSupported(Level level) {
+        AABB probe = new AABB(
+                x - bbWidth * 0.5, y - 0.08, z - bbWidth * 0.5,
+                x + bbWidth * 0.5, y + 0.02, z + bbWidth * 0.5);
+        return level.getBlockCollisions(null, probe).iterator().hasNext();
+    }
+
+    private void igniteConsume() {
+        if (!consumed) {
+            consumed = true;
+            maxAgeTicks = Math.min(maxAgeTicks, age + BURN_TICKS);
+            fadeTicks = Math.min(Math.max(fadeTicks, BURN_TICKS / 2), maxAgeTicks);
+        }
+    }
+
+    /**
+     * Dissolve motes that puff out FROM the body itself as it fades: a few cheap particles per tick,
+     * spawned at points spread across the body's oriented bounding box (so they come off the actual
+     * limbs in whatever pose it lies), drifting outward with almost no upward velocity - they do NOT
+     * shoot high into the air.
+     */
+    private void spawnFadeParticles(Level level) {
+        var random = level.getRandom();
+        double cx = x;
+        double cy = y + halfHeight;
+        double cz = z;
+        for (int i = 0; i < 2; i++) { // very light: 2 per tick
+            // A random point inside the body box, then rotated by the body's orientation so motes
+            // emit from where the limbs actually are (lying flat, on its side, etc.).
+            float lx = (random.nextFloat() - 0.5f) * (float) bbWidth;
+            float ly = (random.nextFloat() - 0.5f) * (float) bbHeight;
+            float lz = (random.nextFloat() - 0.5f) * (float) bbWidth;
+            Vector3f p = scratchV.set(lx, ly, lz).rotate(rot);
+            level.addParticle(ParticleTypes.END_ROD,
+                    cx + p.x(), cy + p.y(), cz + p.z(),
+                    (random.nextDouble() - 0.5) * 0.02,
+                    (random.nextDouble() - 0.5) * 0.02, // near-zero vertical: stays at the body
+                    (random.nextDouble() - 0.5) * 0.02);
+        }
+    }
+
+    public void render(Minecraft mc, PoseStack pose, MultiBufferSource buffers, Vec3 cam, float partialTick) {
+        EntityRenderDispatcher dispatcher = mc.getEntityRenderDispatcher();
+        @SuppressWarnings("unchecked")
+        EntityRenderer<Entity> renderer = (EntityRenderer<Entity>) dispatcher.getRenderer(entity);
+        if (renderer == null) {
+            return;
+        }
+
+        float alpha = fadeAlpha(partialTick);
+        if (alpha <= 0.02f) {
+            return;
+        }
+
+        // Torn-off limbs and dropped items are independent chunks in world space - draw them
+        // (fading with the corpse, and on their own lifetimes).
+        for (int i = 0; i < flyingLimbs.size(); i++) {
+            flyingLimbs.get(i).render(mc, pose, buffers, cam, partialTick, alpha);
+        }
+        for (int i = 0; i < droppedItems.size(); i++) {
+            droppedItems.get(i).render(mc, pose, buffers, cam, partialTick, alpha);
+        }
+
+        double rx = Mth.lerp(partialTick, px, x);
+        double ry = Mth.lerp(partialTick, py, y);
+        double rz = Mth.lerp(partialTick, pz, z);
+
+        // Distance culling (cheap, keeps far-away corpses from costing draw calls).
+        double maxDist = Config.maxRenderDistance();
+        if (maxDist > 0.0) {
+            double dx = rx - cam.x, dy = (ry + halfHeight) - cam.y, dz = rz - cam.z;
+            if (dx * dx + dy * dy + dz * dz > maxDist * maxDist) {
+                return;
+            }
+        }
+
+        Quaternionf orientation = scratchQ.set(prevRot).slerp(rot, partialTick);
+        int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry + halfHeight, rz));
+
+        // Lower the body so it rests on the ground rather than hovering at its hitbox centre. The
+        // drop is computed from the live orientation so the body stays seated on its edge while it
+        // topples, and is ramped in from the moment it first touched down to avoid a pop.
+        double drop = 0.0;
+        if (restStartAge >= 0) {
+            float t = Mth.clamp((age + partialTick - restStartAge) / (float) RESTDROP_RAMP_TICKS, 0.0f, 1.0f);
+            drop = computeRestDrop(orientation) * t;
+        }
+
+        // While fading, route rendering through a buffer source that turns the body layers
+        // translucent (its own texture) and scales vertex alpha, so the corpse genuinely fades out
+        // instead of popping at the alpha cutoff. The texture comes straight from the renderer.
+        ResourceLocation tex = safeTexture(renderer);
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha, tex) : buffers;
+
+        // Freeze every state the renderer would use to rotate/animate the model so it draws upright
+        // and undeformed; our quaternion then orients the whole body as one rigid piece.
+        float oldYBodyRot = entity.yBodyRot;
+        float oldYBodyRotO = entity.yBodyRotO;
+        float oldYRot = entity.getYRot();
+        float oldYRotO = entity.yRotO;
+        float oldXRot = entity.getXRot();
+        float oldXRotO = entity.xRotO;
+        float oldYHeadRot = entity.yHeadRot;
+        float oldYHeadRotO = entity.yHeadRotO;
+        int oldDeathTime = entity.deathTime;
+        int oldHurtTime = entity.hurtTime;
+
+        entity.yBodyRot = entity.yBodyRotO = 0.0f;
+        entity.setYRot(0.0f);
+        entity.yRotO = 0.0f;
+        entity.setXRot(0.0f);
+        entity.xRotO = 0.0f;
+        entity.yHeadRot = entity.yHeadRotO = 0.0f;
+        entity.deathTime = 0;
+        entity.hurtTime = 0; // a mob killed by a hit keeps hurtTime>0 -> permanent red tint; clear it
+
+        dispatcher.setRenderShadow(false);
+        pose.pushPose();
+        try {
+            pose.translate(rx - cam.x, (ry - drop) - cam.y, rz - cam.z);
+            // Rotate about the body's centre of mass for a natural tumble.
+            pose.translate(0.0, halfHeight, 0.0);
+            pose.mulPose(orientation);
+            // Fade-out: primarily a smooth transparency (FadeBufferSource scales vertex alpha on a
+            // translucent render type). As a guaranteed-visible safety - so the body can NEVER just
+            // pop out if translucent blending is unavailable on a setup - we also gently shrink it
+            // toward its centre over the fade (1.0 -> ~0.55), which always reads on screen.
+            if (alpha < 0.999f) {
+                float s = 0.55f + 0.45f * alpha;
+                pose.scale(s, s, s);
+            }
+            pose.translate(0.0, -halfHeight, 0.0);
+
+            // Hand the limb skeleton to the render mixin (floppy limbs / torn-off hiding).
+            RagdollRenderContext.set(skeleton);
+            renderer.render(entity, 0.0f, partialTick, pose, source, light);
+        } catch (Exception e) {
+            // A foreign renderer may dislike being driven for a removed entity; never crash the game.
+            // Log once per corpse (WARN) so issues are diagnosable without spamming every frame.
+            if (!renderErrorLogged) {
+                renderErrorLogged = true;
+                Ragdolls.LOGGER.warn("Ragdoll render failed for entity type {} (render disabled, still simulating)",
+                        entity.getType(), e);
+            }
+        } finally {
+            pose.popPose();
+            dispatcher.setRenderShadow(true);
+            RagdollRenderContext.clear();
+            if (skeleton != null) {
+                skeleton.restore();
+            }
+
+            entity.yBodyRot = oldYBodyRot;
+            entity.yBodyRotO = oldYBodyRotO;
+            entity.setYRot(oldYRot);
+            entity.yRotO = oldYRotO;
+            entity.setXRot(oldXRot);
+            entity.xRotO = oldXRotO;
+            entity.yHeadRot = oldYHeadRot;
+            entity.yHeadRotO = oldYHeadRotO;
+            entity.deathTime = oldDeathTime;
+            entity.hurtTime = oldHurtTime;
+        }
+    }
+
+    /** Combined fade factor: the lifetime tail-fade and any forced dissolve, whichever is lower. */
+    private float fadeAlpha(float partialTick) {
+        float a = 1.0f;
+        if (fadeTicks > 0) {
+            float remaining = maxAgeTicks - (age + partialTick);
+            if (remaining < fadeTicks) {
+                a = Math.min(a, Mth.clamp(remaining / fadeTicks, 0.0f, 1.0f));
+            }
+        }
+        if (fadeStartAge >= 0) {
+            float elapsed = (age + partialTick) - fadeStartAge;
+            a = Math.min(a, Mth.clamp(1.0f - elapsed / fadeDurTicks, 0.0f, 1.0f));
+        }
+        return a;
+    }
+
+    public boolean isFinished() {
+        if (entity.level() != Minecraft.getInstance().level) {
+            return true;
+        }
+        if (age >= maxAgeTicks) {
+            return true;
+        }
+        return fadeStartAge >= 0 && (age - fadeStartAge) >= fadeDurTicks;
+    }
+}

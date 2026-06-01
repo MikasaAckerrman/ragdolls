@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.ragdolls.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "AgeableListModelAccessor",
+    "HumanoidArmorLayerMixin",
+    "HumanoidModelMixin",
+    "ItemInHandLayerMixin",
+    "LivingEntityRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
