@@ -185,7 +185,10 @@ public final class Ragdoll {
         // Realistic horizontal travel distance (blocks): a normal hit shoves the body a couple of
         // metres, a strong/crit blow noticeably further; capped so nothing flies across the map.
         double dist = Mth.clamp(1.0 + Math.max(0.0, damage - 3.0) * 0.12, 0.6, 9.0);
-        double vyPop = 0.10 + Math.min(damage * 0.004, 0.10);
+        // Small upward pop only: a killed mob should crumple and fall at vanilla speed, NOT hop up
+        // (a large upward launch read as "slow falling"). Generic melee gets a gentle lift; the
+        // explosion case keeps a real pop.
+        double vyPop = 0.04 + Math.min(damage * 0.003, 0.05);
         double spinScale = 1.0;
         switch (cause) {
             case DeathPayload.CAUSE_EXPLOSION -> {
@@ -193,10 +196,10 @@ public final class Ragdoll {
                 vyPop = 0.24 + Math.min(damage * 0.005, 0.16);
                 spinScale = 1.6;
             }
-            case DeathPayload.CAUSE_PROJECTILE -> vyPop = 0.07; // flatter push along the shot
+            case DeathPayload.CAUSE_PROJECTILE -> vyPop = 0.05; // flatter push along the shot
             case DeathPayload.CAUSE_FALL -> {
                 dist *= 0.35;
-                vyPop = 0.04;
+                vyPop = 0.02;
                 spinScale = 1.3;
             }
             default -> { }
@@ -209,12 +212,11 @@ public final class Ragdoll {
         this.vx = dir.x * horizVel;
         this.vz = dir.z * horizVel;
 
-        // Vertical launch follows WHERE the blow landed: a hit low on the body (legs, hitHeight~0)
-        // drives it up and over more (the feet kick out), a hit high (head) keeps it flatter. This
-        // is the "impulse goes where you struck" feel the player asked for.
+        // Vertical launch follows WHERE the blow landed, but stays SMALL so gravity dominates and
+        // the body drops at a natural speed (a low/legs hit lifts the feet just a touch more).
         double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 (feet) .. +1 (head)
-        double lowHitLift = (1.0 - payload.hitHeight()) * 0.18; // bigger upward kick for low hits
-        this.vy = Math.max(0.12, vyPop) + lowHitLift + (payload.critical() ? 0.03 : 0.0);
+        double lowHitLift = (1.0 - payload.hitHeight()) * 0.06;
+        this.vy = vyPop + lowHitLift + (payload.critical() ? 0.02 : 0.0);
 
         // Initial tumble: spin axis is horizontal and perpendicular to the push, so the body
         // cartwheels in the direction it is thrown. A hit high on the body (head) topples it
@@ -600,9 +602,25 @@ public final class Ragdoll {
         return true;
     }
 
-    /** World box around the corpse (for hit raycasting). */
+    /**
+     * World-space AABB that encloses the corpse in its CURRENT orientation (tight oriented-box
+     * bound). Standing it is ~0.6x1.8x0.6; lying flat it becomes wide and short, so a block mined
+     * underneath a lying body is below the box and the player's swing is NOT stolen by the corpse.
+     * Centre matches the rendered body (lowered by the rest-drop so it sits on the floor).
+     */
     public AABB currentBox() {
-        return AABB.ofSize(new Vec3(x, y + halfHeight, z), bbWidth, bbHeight, bbWidth);
+        float hx = (float) (bbWidth * 0.5);
+        float hy = (float) halfHeight;
+        float hz = (float) (bbWidth * 0.5);
+        Vector3f ex = new Vector3f(hx, 0, 0).rotate(rot);
+        Vector3f ey = new Vector3f(0, hy, 0).rotate(rot);
+        Vector3f ez = new Vector3f(0, 0, hz).rotate(rot);
+        double wHalfX = Math.abs(ex.x()) + Math.abs(ey.x()) + Math.abs(ez.x());
+        double wHalfY = Math.abs(ex.y()) + Math.abs(ey.y()) + Math.abs(ez.y());
+        double wHalfZ = Math.abs(ex.z()) + Math.abs(ey.z()) + Math.abs(ez.z());
+        double drop = restStartAge >= 0 ? computeRestDrop(rot) : 0.0;
+        double cy = y + halfHeight - drop;
+        return new AABB(x - wHalfX, cy - wHalfY, z - wHalfZ, x + wHalfX, cy + wHalfY, z + wHalfZ);
     }
 
     /**
@@ -1011,11 +1029,17 @@ public final class Ragdoll {
             // Rotate about the body's centre of mass for a natural tumble.
             pose.translate(0.0, halfHeight, 0.0);
             pose.mulPose(orientation);
+            // Fade-out: primarily a smooth transparency (FadeBufferSource scales vertex alpha on a
+            // translucent render type). As a guaranteed-visible safety - so the body can NEVER just
+            // pop out if translucent blending is unavailable on a setup - we also gently shrink it
+            // toward its centre over the fade (1.0 -> ~0.55), which always reads on screen.
+            if (alpha < 0.999f) {
+                float s = 0.55f + 0.45f * alpha;
+                pose.scale(s, s, s);
+            }
             pose.translate(0.0, -halfHeight, 0.0);
 
-            // Fade-out is pure transparency: FadeBufferSource scales every vertex's alpha so the
-            // whole model turns see-through, then the corpse is removed from memory (see
-            // isFinished). No shrink/scale animation.
+            // Hand the limb skeleton to the render mixin (floppy limbs / torn-off hiding).
             RagdollRenderContext.set(skeleton);
             renderer.render(entity, 0.0f, partialTick, pose, source, light);
         } catch (Exception e) {
