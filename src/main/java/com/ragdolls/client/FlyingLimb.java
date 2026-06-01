@@ -9,6 +9,7 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
@@ -182,7 +183,13 @@ final class FlyingLimb {
 
         Quaternionf orientation = scratchQ.set(prevRot).slerp(rot, partialTick);
         int light = LevelRenderer.getLightColor(mc.level, BlockPos.containing(rx, ry, rz));
-        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
+        ResourceLocation tex;
+        try {
+            tex = renderer.getTextureLocation(entity);
+        } catch (Throwable t) {
+            tex = null;
+        }
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha, tex) : buffers;
 
         // Freeze the renderer's own rotation/animation state so the model draws undeformed; our
         // quaternion then tumbles the whole (masked) model as one rigid chunk about its centre.

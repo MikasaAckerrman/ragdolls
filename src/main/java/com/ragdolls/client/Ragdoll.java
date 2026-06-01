@@ -15,6 +15,7 @@ import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
@@ -181,9 +182,9 @@ public final class Ragdoll {
         int cause = payload.cause();
         double kb = Config.knockbackMultiplier();
 
-        // Realistic horizontal travel distance (blocks): a strong netherite-crit (~15 dmg) lands
-        // about a metre away; bigger hits throw further, capped so nothing flies across the map.
-        double dist = Mth.clamp(0.5 + Math.max(0.0, damage - 5.0) * 0.06, 0.35, 6.0);
+        // Realistic horizontal travel distance (blocks): a normal hit shoves the body a couple of
+        // metres, a strong/crit blow noticeably further; capped so nothing flies across the map.
+        double dist = Mth.clamp(1.0 + Math.max(0.0, damage - 3.0) * 0.12, 0.6, 9.0);
         double vyPop = 0.10 + Math.min(damage * 0.004, 0.10);
         double spinScale = 1.0;
         switch (cause) {
@@ -202,25 +203,31 @@ public final class Ragdoll {
         }
         dist *= kb;
 
-        double horizVel = Mth.clamp(dist * 0.085, 0.0, 0.7);
+        // Farther, weight-aware travel: lighter bodies are flung proportionally further by the same
+        // blow. dist is in blocks; convert to a per-tick launch speed (heavier => less).
+        double horizVel = Mth.clamp(dist * 0.11 / Math.sqrt(mass), 0.0, 0.95);
         this.vx = dir.x * horizVel;
         this.vz = dir.z * horizVel;
-        this.vy = Math.max(0.12, vyPop) + (payload.critical() ? 0.03 : 0.0);
+
+        // Vertical launch follows WHERE the blow landed: a hit low on the body (legs, hitHeight~0)
+        // drives it up and over more (the feet kick out), a hit high (head) keeps it flatter. This
+        // is the "impulse goes where you struck" feel the player asked for.
+        double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 (feet) .. +1 (head)
+        double lowHitLift = (1.0 - payload.hitHeight()) * 0.18; // bigger upward kick for low hits
+        this.vy = Math.max(0.12, vyPop) + lowHitLift + (payload.critical() ? 0.03 : 0.0);
 
         // Initial tumble: spin axis is horizontal and perpendicular to the push, so the body
         // cartwheels in the direction it is thrown. A hit high on the body (head) topples it
-        // forward, a low hit (legs) backward. This sets the starting angular velocity; from here on
-        // gravity's topple torque about the centre of mass takes over (real inertia).
+        // forward over its feet, a low hit (legs) flips it backward - direction set by the lever.
         Vec3 axis = new Vec3(0.0, 1.0, 0.0).cross(dir);
         if (axis.lengthSqr() < 1.0e-4) {
             axis = new Vec3(1.0, 0.0, 0.0);
         }
         axis = axis.normalize();
 
-        double lever = (payload.hitHeight() - 0.5) * 2.0; // -1 (feet) .. +1 (head)
         double sign = lever >= 0.0 ? 1.0 : -1.0;
         double spin = Mth.clamp(
-                sign * (0.10 + Math.min(damage * 0.008, 0.18) + Math.abs(lever) * 0.08) * spinScale,
+                sign * (0.12 + Math.min(damage * 0.01, 0.22) + Math.abs(lever) * 0.12) * spinScale,
                 -MAX_ANG, MAX_ANG);
         this.wx = axis.x * spin;
         this.wy = axis.y * spin;
@@ -397,30 +404,25 @@ public final class Ragdoll {
 
         // How far the body still is from lying flat (its "up" axis points up = still standing).
         Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot);
-        boolean flat = up.y() < 0.30f; // |up| nearly horizontal -> the body is lying down
+        boolean flat = up.y() < 0.18f; // |up| nearly horizontal -> the body is really lying down
 
         if (grounded && !inFluid) {
             if (restStartAge < 0) {
                 restStartAge = age;
             }
-            if (!flat) {
-                // Still standing/tilting: gravity at the CoM tips the body further the way it leans,
-                // so it keels over and lies down. We do NOT damp the spin here (damping would kill
-                // the topple before it tips). A body that landed bolt-upright (topple ~0 there) gets
-                // a deterministic shove so it never just stands and jitters.
-                applyToppleTorque();
-                double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
-                if (up.y() > 0.85f && angMag < 0.05) {
-                    double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17 + Mth.floor(y) * 7) * 0.7;
-                    wx += Math.cos(a) * 0.06;
-                    wz += Math.sin(a) * 0.06;
-                }
-            } else {
-                // Lying down: NO more topple torque (applying it near-flat would inject a permanent
-                // residual roll that never drops below the freeze threshold). Just bleed the last of
-                // the roll so the body comes fully to rest and can freeze.
-                applyAngularDrag(ANG_DRAG_GROUND);
+            // Gravity at the CoM keeps tipping the body the way it leans until it lies flat (the
+            // torque self-vanishes as up.y -> 0, so it never spins past flat). A body that landed
+            // bolt-upright (topple ~0 there) gets a deterministic shove so it always keels over.
+            applyToppleTorque();
+            double angMag = Math.sqrt(wx * wx + wy * wy + wz * wz);
+            if (up.y() > 0.85f && angMag < 0.05) {
+                double a = (Mth.floor(x) * 31 + Mth.floor(z) * 17 + Mth.floor(y) * 7) * 0.7;
+                wx += Math.cos(a) * 0.06;
+                wz += Math.sin(a) * 0.06;
             }
+            // ALWAYS bleed rotation on the ground: this bounds the topple (so a body can never
+            // cartwheel forever / "just spin instead of falling") and lets it settle once flat.
+            applyAngularDrag(ANG_DRAG_GROUND);
         } else {
             applyAngularDrag(ANG_DRAG_AIR);
             // Airborne (flying/falling, not resting and not in fluid): pause the disappearance timer
@@ -434,7 +436,7 @@ public final class Ragdoll {
         }
 
         // Freeze ONLY once it is lying flat AND all motion has died out (linear + tumble + limbs).
-        // Requiring "flat" is what stops a corpse freezing bolt-upright and jittering in place.
+        // Requiring "flat" is what stops a corpse freezing propped-up on its legs or jittering.
         double angNow = Math.sqrt(wx * wx + wy * wy + wz * wz);
         boolean motionless = grounded && !inFluid && flat
                 && Math.abs(vy) < 0.04 && horizontal < 0.02 && angNow < 0.012;
@@ -452,9 +454,10 @@ public final class Ragdoll {
      */
     private void applyToppleTorque() {
         Vector3f up = scratchV.set(0.0f, 1.0f, 0.0f).rotate(rot); // body up-axis in world space
-        // Only an upright-ish body topples; once it is on its side/face (up.y <= 0) it has reached a
-        // lying pose, so we stop adding torque and let drag settle it (no spinning past flat).
-        if (up.y() <= 0.05f) {
+        // Once the body is essentially lying down (up nearly horizontal) we stop adding torque, so
+        // ground drag can pull the last of the roll to zero and the corpse can freeze. (If this
+        // threshold is too low the torque fights the drag forever and the body never settles.)
+        if (up.y() <= 0.18f) {
             return;
         }
         // Horizontal lean direction = where "up" points sideways; tip the body that way (gravity at
@@ -812,6 +815,19 @@ public final class Ragdoll {
     }
 
     /**
+     * The corpse's own texture from its renderer (for the translucent fade). Never throws - a
+     * foreign renderer that dislikes being queried just yields null and the fade alpha-scales on the
+     * original type (graceful).
+     */
+    private ResourceLocation safeTexture(EntityRenderer<Entity> renderer) {
+        try {
+            return renderer.getTextureLocation(entity);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
      * How far to lower the model so its lowest point touches the ground for the current orientation.
      * For an upright body this is 0; for one lying flat it is roughly (halfHeight - bodyWidth/2).
      */
@@ -886,20 +902,28 @@ public final class Ragdoll {
     }
 
     /**
-     * The corpse "evaporating": a few white motes per tick that rise HIGH and scatter chaotically.
-     * Kept cheap - at most a handful of particles per tick - so mass deaths do not cost FPS.
+     * Dissolve motes that puff out FROM the body itself as it fades: a few cheap particles per tick,
+     * spawned at points spread across the body's oriented bounding box (so they come off the actual
+     * limbs in whatever pose it lies), drifting outward with almost no upward velocity - they do NOT
+     * shoot high into the air.
      */
     private void spawnFadeParticles(Level level) {
         var random = level.getRandom();
-        for (int i = 0; i < 3; i++) { // a few per tick; chaotic but still very light
-            double ox = (random.nextDouble() - 0.5) * bbWidth;
-            double oy = random.nextDouble() * bbHeight;
-            double oz = (random.nextDouble() - 0.5) * bbWidth;
-            double upward = 0.22 + random.nextDouble() * 0.28; // rise well above the body
-            double swirl = 0.06; // chaotic horizontal scatter
+        double cx = x;
+        double cy = y + halfHeight;
+        double cz = z;
+        for (int i = 0; i < 2; i++) { // very light: 2 per tick
+            // A random point inside the body box, then rotated by the body's orientation so motes
+            // emit from where the limbs actually are (lying flat, on its side, etc.).
+            float lx = (random.nextFloat() - 0.5f) * (float) bbWidth;
+            float ly = (random.nextFloat() - 0.5f) * (float) bbHeight;
+            float lz = (random.nextFloat() - 0.5f) * (float) bbWidth;
+            Vector3f p = scratchV.set(lx, ly, lz).rotate(rot);
             level.addParticle(ParticleTypes.END_ROD,
-                    x + ox, y + oy, z + oz,
-                    (random.nextDouble() - 0.5) * swirl, upward, (random.nextDouble() - 0.5) * swirl);
+                    cx + p.x(), cy + p.y(), cz + p.z(),
+                    (random.nextDouble() - 0.5) * 0.02,
+                    (random.nextDouble() - 0.5) * 0.02, // near-zero vertical: stays at the body
+                    (random.nextDouble() - 0.5) * 0.02);
         }
     }
 
@@ -950,9 +974,11 @@ public final class Ragdoll {
             drop = computeRestDrop(orientation) * t;
         }
 
-        // While fading, route rendering through a buffer source that turns every layer translucent
-        // (body, armor, items) and scales vertex alpha, so the whole corpse genuinely fades out.
-        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha) : buffers;
+        // While fading, route rendering through a buffer source that turns the body layers
+        // translucent (its own texture) and scales vertex alpha, so the corpse genuinely fades out
+        // instead of popping at the alpha cutoff. The texture comes straight from the renderer.
+        ResourceLocation tex = safeTexture(renderer);
+        MultiBufferSource source = alpha < 0.999f ? new FadeBufferSource(buffers, alpha, tex) : buffers;
 
         // Freeze every state the renderer would use to rotate/animate the model so it draws upright
         // and undeformed; our quaternion then orients the whole body as one rigid piece.
